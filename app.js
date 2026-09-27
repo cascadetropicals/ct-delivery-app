@@ -47,6 +47,7 @@ const PINS_FILE = "pins.json";
 const STORAGE_KEY_STATE = "ct_driver_state_v1";
 const STORAGE_KEY_QUEUE = "ct_offline_queue_v1";
 const STORAGE_KEY_ROUTE_PLAN_CACHE = "ct_route_plan_cache_v1"; // last successfully fetched {manifest, pins}, for offline fallback
+const STORAGE_KEY_ROUTE_TIMING_STATE = "ct_route_timing_state_v1"; // routeStarted_/routeEnded_ + their timestamps, keyed to today's truck+date — see restoreRouteTimingStateLocal_
 const STORAGE_KEY_ITEMS_CATALOG_CACHE = "ct_items_catalog_cache_v1"; // last successfully fetched items catalog (see loadItemsCatalog_), for offline "Add Item" search after the first load
 
 // ---------- app state ----------
@@ -399,12 +400,13 @@ function wireLoginScreen() {
     currentTruck = selectedTruck;
     pinInput.value = "";
     loginError.textContent = "";
-    // Fresh login — this driver/truck hasn't tapped Start Driving (or End
-    // Route) yet.
-    routeStarted_ = false;
-    routeEnded_ = false;
-    routeStartedAtLocal_ = null;
-    routeEndedAtLocal_ = null;
+    // Restores routeStarted_/routeEnded_ from localStorage if this exact
+    // truck+date already has a saved Start Driving/End Route state (a
+    // driver who already started their route, then reloaded or relaunched
+    // the app later the same shift, should still see "End Route" — not
+    // "Start Driving" again). A genuinely new truck/day starts fresh. See
+    // restoreRouteTimingStateLocal_.
+    restoreRouteTimingStateLocal_();
     openRouteScreen_();
   });
 }
@@ -536,6 +538,7 @@ function startRoute_() {
   };
   queueOffline_(payload);
   flushOfflineQueue_();
+  saveRouteTimingStateLocal_();
   updateRouteStatusBox_();
 }
 
@@ -561,7 +564,61 @@ function endRoute_() {
   };
   queueOffline_(payload);
   flushOfflineQueue_();
+  saveRouteTimingStateLocal_();
   updateRouteStatusBox_();
+}
+
+// routeStarted_/routeEnded_ (and their timestamps) used to live in memory
+// only — fine as long as the page never reloaded, but a browser/PWA reload
+// (including the routine "hard reload to pick up an app update" this
+// project does after every delivery) drops back to the login screen, and
+// logging back in used to unconditionally reset these flags to false. A
+// driver who already tapped Start Driving, then reloaded or relaunched the
+// app later the same shift, would see "Start Driving" again instead of "End
+// Route" — tapping it then logged a SECOND Route Start row to the sheet
+// instead of the route end they actually meant to log. This is why
+// Route Timing showed two "Route Start" rows for the same truck+date
+// instead of a Start and an End. Persisted here per truck+date (via
+// manifest.dispatch_date, the same date value every Route Timing row is
+// already keyed on) so it survives a reload/relaunch the same day; logging
+// into a different truck, or a new day's route plan, still starts fresh.
+function saveRouteTimingStateLocal_() {
+  if (!manifest || !currentTruck) return;
+  try {
+    localStorage.setItem(STORAGE_KEY_ROUTE_TIMING_STATE, JSON.stringify({
+      key: manifest.dispatch_date + "|" + currentTruck,
+      routeStarted: routeStarted_,
+      routeEnded: routeEnded_,
+      startedAtIso: routeStartedAtLocal_ ? routeStartedAtLocal_.toISOString() : null,
+      endedAtIso: routeEndedAtLocal_ ? routeEndedAtLocal_.toISOString() : null,
+    }));
+  } catch (err) {
+    console.warn("could not persist route timing state", err);
+  }
+}
+
+// Called right after a successful login, in place of the old unconditional
+// reset — restores a saved Start Driving/End Route state for this exact
+// truck+date if one exists (see saveRouteTimingStateLocal_ above), or
+// starts fresh (all false/null) for a truck/date that's never tapped Start
+// Driving yet, same as before this fix.
+function restoreRouteTimingStateLocal_() {
+  routeStarted_ = false;
+  routeEnded_ = false;
+  routeStartedAtLocal_ = null;
+  routeEndedAtLocal_ = null;
+  if (!manifest || !currentTruck) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY_ROUTE_TIMING_STATE) || "null");
+    if (saved && saved.key === manifest.dispatch_date + "|" + currentTruck) {
+      routeStarted_ = !!saved.routeStarted;
+      routeEnded_ = !!saved.routeEnded;
+      routeStartedAtLocal_ = saved.startedAtIso ? new Date(saved.startedAtIso) : null;
+      routeEndedAtLocal_ = saved.endedAtIso ? new Date(saved.endedAtIso) : null;
+    }
+  } catch (err) {
+    console.warn("could not restore route timing state", err);
+  }
 }
 
 function renderRouteList_() {
@@ -885,9 +942,9 @@ function getStopDeliveryFee_(stop) {
 // lowers a line's own Sub Total and leaves the invoiced Total exactly as it
 // was), an added item raises what's owed, so its dollar amount has to be
 // folded into the printed/emailed total BEFORE it ever reaches Code.gs —
-// see this function's two call sites (submitStop_, buildReceiptHtml_) and
-// the matching design-intent comment on buildAndSavePdf_ in Code.gs, which
-// just displays body.total as given rather than recomputing it.
+// see this function's two call sites (submitStop_, buildStopPdfPayload_) and
+// the matching design-intent comment on buildDeliveryPdfBlob_ in Code.gs,
+// which just displays body.total as given rather than recomputing it.
 function addedItemsSubtotal_(items) {
   return Object.values(items).reduce((sum, it) => {
     const unitPrice = it.unit_price != null ? Number(it.unit_price) : 0;
@@ -1311,12 +1368,12 @@ const REJECT_DETAIL_OPTIONS = ["Damaged leafs", "Pests", "Too small"];
 
 // The one place a flagged item's reason gets turned into the string this
 // app actually displays/stores/submits everywhere (the collapsed/expanded
-// row status, the submit payload, the on-device receipt) — folds in
+// row status, the submit payload, the printed delivery note) — folds in
 // reject_detail when there is one ("Rejected - Pests"), otherwise just the
 // bare top-level reason. ex.reason ITSELF is never this combined string —
 // keeping it exactly one of EXCEPTION_REASONS is what lets the reason pill's
 // own "selected" check (reason === r) keep working once a sub-reason is
-// picked. See buildExceptionInlineForm_/submitStop_/printReceiptForCustomer_.
+// picked. See buildExceptionInlineForm_/submitStop_/buildStopPdfPayload_.
 function exceptionReasonText_(ex) {
   if (ex.reason === "Rejected" && ex.reject_detail) return "Rejected - " + ex.reject_detail;
   return ex.reason;
@@ -1646,16 +1703,15 @@ function wireSignatureScreen() {
   document.getElementById("clear-sig-btn").addEventListener("click", clearSignaturePad_);
   document.getElementById("submit-btn").addEventListener("click", () => submitStop_(true));
   document.getElementById("skip-sig-btn").addEventListener("click", () => submitStop_(false));
-  document.getElementById("print-receipt-btn").addEventListener("click", printReceiptForCustomer_);
 
-  // The official-PDF print button — only ever lives on THIS screen now, per
-  // G's "this should be option on the next site." See openSignatureScreen_
-  // for the visibility toggle.
-  document.getElementById("print-pdf-btn-signature").addEventListener("click", () => {
-    const fileId = currentStop && currentStop.driver_state && currentStop.driver_state.pdf_file_id;
-    if (!fileId) return;
-    window.open(APPS_SCRIPT_URL + "?action=get_pdf&file_id=" + encodeURIComponent(fileId), "_blank");
-  });
+  // There is only ONE print button now — "Print Delivery Note" — and it
+  // always produces the exact same official PDF that gets emailed to the
+  // customer on real submit, whether or not this stop has synced yet. Per
+  // G: "it should always print the full edited pdf thats also sent by mail
+  // when submitted." See printDeliveryNote_ for the synced-vs-unsynced
+  // branch. The old separate on-device "Print Copy for Customer" receipt
+  // button is gone.
+  document.getElementById("print-pdf-btn-signature").addEventListener("click", printDeliveryNote_);
 }
 
 function openSignatureScreen_(stop) {
@@ -1664,12 +1720,9 @@ function openSignatureScreen_(stop) {
   document.getElementById("skip-sig-btn").disabled = false;
   document.getElementById("signature-stop-name").textContent = stop.customer_name;
 
-  // Shown only once this stop already has a signed PDF synced from a
-  // previous submit (driver_state.pdf_file_id) — invisible on a stop's very
-  // first pass through here, visible any time it's reopened after that.
-  const pdfFileId = stop.driver_state && stop.driver_state.pdf_file_id;
-  document.getElementById("print-pdf-row-signature").classList.toggle("hidden", !pdfFileId);
-
+  // The "Print Delivery Note" row is always visible now — printDeliveryNote_
+  // itself decides whether to open the already-synced PDF or generate an
+  // on-demand preview from what's currently entered (see printDeliveryNote_).
   showScreen_("screen-signature");
   // The canvas lives inside a ".screen" that is "display:none" until now, so
   // getBoundingClientRect() would return 0x0 (and toDataURL() an empty image)
@@ -1844,7 +1897,6 @@ async function submitStop_(wantsSignature) {
   if (!currentStop || isSubmitting) return;
 
   const hasSignature = wantsSignature && sigPad.hasStroke;
-  const signatureImage = hasSignature ? document.getElementById("sig-pad").toDataURL("image/png") : null;
 
   // A signature is only truly "captured" when something was actually drawn
   // (hasSignature above already accounts for tapping "Submit Delivery" with
@@ -1860,6 +1912,149 @@ async function submitStop_(wantsSignature) {
   isSubmitting = true;
   document.getElementById("submit-btn").disabled = true;
   document.getElementById("skip-sig-btn").disabled = true;
+
+  // Same payload builder printDeliveryNote_'s preview uses (see
+  // buildStopPdfPayload_'s own comment) — keeps the real submit and the
+  // on-demand preview PDF permanently in lockstep instead of two
+  // hand-maintained copies of this same business logic quietly drifting
+  // apart. hasSignature here preserves submitStop_'s own "Submit Without
+  // Signature" semantics (deliberately discards a drawn signature even if
+  // one exists when that button was tapped instead of "Submit Delivery").
+  const payload = buildStopPdfPayload_("submit_stop", hasSignature);
+  const racksUnloaded = payload.racks_unloaded;
+  const exceptions = payload.exceptions;
+  const addedItemsPayload = payload.added_items;
+  const hasAddedItems = addedItemsPayload.length > 0;
+
+  // An added item gets the same "exceptions" local-state status as a
+  // rejected/short/damaged line — both mean this delivery isn't exactly the
+  // clean as-invoiced case, and both are logged to the Exceptions Log the
+  // same way server-side (see handleSubmitStop_ in Code.gs). This no longer
+  // changes the route list's pill COLOR (done_clean/done_exceptions both
+  // render green now — see PROJECT-NOTES.md), only the underlying record.
+  const newStatus = (exceptions.length > 0 || hasAddedItems) ? "done_exceptions" : "done_clean";
+  saveDriverStateLocal_(currentStop.stop_id, {
+    racks_unloaded: racksUnloaded,
+    exceptions: exceptions,
+    added_items: addedItemsPayload,
+    signature_image: payload.signature_image,
+    signature_skipped_reason: payload.signature_skipped_reason,
+    rack_photo_image: rackPhotoDataUrl,
+    signed_at: payload.submitted_at_iso,
+    status: newStatus,
+  });
+  applyStoredDriverState_();
+
+  // The actual send to the backend (build the PDF, save it to Drive, email
+  // the customer — a real network round-trip that can take several seconds,
+  // longer on a cold Apps Script start) used to be awaited right here, which
+  // is what made the driver stare at a spinner for a couple of seconds on
+  // every single stop. It no longer blocks the screen: every submit — not
+  // just genuine no-signal ones — now goes through the same offline queue
+  // built for that case (see OFFLINE QUEUE below). queueOffline_ persists it
+  // to localStorage immediately (so it survives a crash/reload even before
+  // it's sent), then flushOfflineQueue_ is kicked off WITHOUT awaiting it.
+  // flushOfflineQueue_ already does everything the old inline success/fail
+  // branch used to do — retries on failure, merges pdf_file_id back into
+  // local state so the print button lights up, updates the queue banner,
+  // and shows its own "synced" toast once the backend actually confirms —
+  // so there's nothing left to branch on here.
+  const customerName = currentStop.customer_name;
+  queueOffline_(payload);
+  flushOfflineQueue_();
+  showToast("Saved — sending " + customerName + "'s delivery in the background.");
+
+  isSubmitting = false;
+  currentStop = null;
+  flaggedItems = {};
+  addedItems = {};
+  addItemPanelOpen_ = false;
+  addItemSearchText_ = "";
+  rackPhotoDataUrl = null;
+  renderRouteList_();
+  showScreen_("screen-route");
+}
+
+// ==================================================================
+// PRINT DELIVERY NOTE (one button, always the real backend PDF)
+// ==================================================================
+// Used to be TWO print buttons on this screen — "Print Delivery Note"
+// (the real backend-generated PDF, only shown once a stop had already
+// synced) and a separate "Print Copy for Customer" (a simpler receipt
+// built entirely on-device, always available, for printing before syncing
+// or fully offline). Per G's screenshot + "we have 2 print buttons - we
+// should only have one!", then "it should always print the full edited
+// pdf thats also sent by mail when submitted": the on-device receipt is
+// gone, and this ONE button now always produces the real document —
+// already-synced stops open the saved PDF exactly as before; a stop not
+// yet synced generates that SAME PDF on demand from the Code.gs backend
+// (handlePreviewPdf_, reusing the exact buildDeliveryPdfBlob_ layout code
+// handleSubmitStop_'s buildAndSavePdf_ calls) fed with whatever's
+// currently on screen. This trades the old receipt's zero-signal
+// guarantee for always matching the real emailed document — a deliberate
+// choice G made when asked, not an oversight; see fetchPdfBlob_ below for
+// how a failed/offline generation is surfaced (a toast, not a silent
+// no-op — see the toast-visibility fix elsewhere in this file for why
+// that toast is now guaranteed visible).
+async function printDeliveryNote_() {
+  if (!currentStop) return;
+
+  // Already synced from a previous submit — open the real saved PDF
+  // exactly as before, no network round trip needed beyond the fetch
+  // itself (same as this always has).
+  const fileId = currentStop.driver_state && currentStop.driver_state.pdf_file_id;
+  if (fileId) {
+    window.open(APPS_SCRIPT_URL + "?action=get_pdf&file_id=" + encodeURIComponent(fileId), "_blank");
+    return;
+  }
+
+  const payload = buildStopPdfPayload_("preview_pdf");
+  if (!payload) return;
+
+  const printBtn = document.getElementById("print-pdf-btn-signature");
+  const originalLabel = printBtn.textContent;
+  printBtn.disabled = true;
+  printBtn.textContent = "Generating…";
+  try {
+    const blob = await fetchPdfBlob_(payload);
+    if (!blob) {
+      showToast("Couldn't generate the delivery note — check your connection and try again.");
+      return;
+    }
+    // Not revoking the object URL after opening — the new tab needs it to
+    // stay valid for as long as it's open/printing, and it's one PDF-sized
+    // URL per tap, reclaimed automatically when that tab closes or the app
+    // reloads. Same pattern the old on-device receipt used for its own
+    // blob URL.
+    const blobUrl = URL.createObjectURL(blob);
+    const win = window.open(blobUrl, "_blank");
+    if (!win) {
+      showToast("Couldn't open the print preview — check that pop-ups are allowed for this site.");
+    }
+  } finally {
+    printBtn.disabled = false;
+    printBtn.textContent = originalLabel;
+  }
+}
+
+// Builds the exact payload shape Code.gs's buildDeliveryPdfBlob_ (via
+// either handleSubmitStop_ or handlePreviewPdf_) needs to render the
+// delivery-confirmation document — shared by submitStop_ (the real submit)
+// and printDeliveryNote_ (a pre-submit preview print) so the two can never
+// quietly drift apart into two different-looking documents, which is
+// exactly the confusion G's "2 print buttons" complaint was about in the
+// first place. hasSignatureOverride lets submitStop_ keep its own
+// "Submit Without Signature" semantics (deliberately discards a drawn
+// signature even if one exists — see its own comment) without baking that
+// one-off rule into this shared builder; omitted, this reads the signature
+// pad's current state as-is, which is what a plain print/preview wants.
+function buildStopPdfPayload_(actionName, hasSignatureOverride) {
+  if (!currentStop) return null;
+
+  const hasSignature = hasSignatureOverride != null ? hasSignatureOverride : sigPad.hasStroke;
+  const signatureImage = hasSignature ? document.getElementById("sig-pad").toDataURL("image/png") : null;
+  const skipReasonSelect = document.getElementById("skip-sig-reason-select");
+  const skipReason = skipReasonSelect ? skipReasonSelect.value : "";
 
   const racksUnloaded = currentStop._racksUnloadedEntered;
   const exceptions = Object.values(flaggedItems).map((ex) => {
@@ -1903,23 +2098,22 @@ async function submitStop_(wantsSignature) {
   });
   const hasAddedItems = addedItemsPayload.length > 0;
   // Per G's "Affects the total" — folded in here, before this ever reaches
-  // Code.gs, so buildAndSavePdf_ can just print body.total/body.subtotal as
-  // given rather than recomputing them (see addedItemsSubtotal_'s own
-  // comment for the full reasoning vs. how exceptions work instead).
+  // Code.gs, so buildDeliveryPdfBlob_ can just print body.total/body.subtotal
+  // as given rather than recomputing them.
   const addedTotal = addedItemsSubtotal_(addedItems);
   const baseSubtotal = getStopSubtotal_(currentStop);
   const baseTotal = getStopTotal_(currentStop);
   const payloadSubtotal = hasAddedItems ? (baseSubtotal || 0) + addedTotal : baseSubtotal;
   const payloadTotal = hasAddedItems ? (baseTotal || 0) + addedTotal : baseTotal;
 
-  // Everything below racks_unloaded is extra context so the backend (Hour 7)
-  // can build a proof-of-delivery PDF without a second lookup — the backend
+  // Everything below racks_unloaded is extra context so the backend can
+  // build a proof-of-delivery PDF without a second lookup — the backend
   // only ever sees a Sheet, not the published route_plan.json file. Deliberately NOT
   // included: total_discrepancy_note / printed_subtotal_on_pdf — that's an
   // internal billing note about our own PDF export bug (see PROJECT-NOTES.md)
   // and must never end up on a document or email sent to the customer.
-  const payload = {
-    action: "submit_stop",
+  return {
+    action: actionName,
     date: manifest.dispatch_date,
     truck: currentStop.truck,
     stop_id: currentStop.stop_id,
@@ -1929,7 +2123,7 @@ async function submitStop_(wantsSignature) {
     address: currentStop.address || "",
     delivery_time: currentStop.delivery_time || "", // planned time, from the route plan — lets the backend log planned-vs-actual to the Route Timing sheet
     payment_terms: currentStop.payment_terms || "",
-    order_note: currentStop.order_note || "", // shown in the PDF's "Order Notes" box — see buildAndSavePdf_ in Code.gs
+    order_note: currentStop.order_note || "", // shown in the PDF's "Order Notes" box — see buildDeliveryPdfBlob_ in Code.gs
     order_numbers: (currentStop.orders || []).map((o) => o.order_number),
     racks_expected: currentStop.racks_expected,
     racks_unloaded: racksUnloaded,
@@ -1937,8 +2131,8 @@ async function submitStop_(wantsSignature) {
     // route plan's own ERP items-export lookup (see enrichLineItemsWithErpData_
     // in Code.gs) — carried straight through from what was loaded, not
     // looked up again here, so the backend PDF builder needs no second
-    // lookup at submit time. Any of these can be blank/null if that item
-    // code wasn't in the export yet — the PDF just leaves that column blank.
+    // lookup at submit/preview time. Any of these can be blank/null if that
+    // item code wasn't in the export yet — the PDF just leaves that column blank.
     line_items: getLineItems_(currentStop).map((li) => ({
       qty: li.qty,
       item_code: li.item_code || "",
@@ -1962,297 +2156,35 @@ async function submitStop_(wantsSignature) {
     contact_emails: currentStop.contact_emails || [],
     submitted_at_iso: new Date().toISOString(),
   };
-
-  // An added item gets the same "exceptions" local-state status as a
-  // rejected/short/damaged line — both mean this delivery isn't exactly the
-  // clean as-invoiced case, and both are logged to the Exceptions Log the
-  // same way server-side (see handleSubmitStop_ in Code.gs). This no longer
-  // changes the route list's pill COLOR (done_clean/done_exceptions both
-  // render green now — see PROJECT-NOTES.md), only the underlying record.
-  const newStatus = (exceptions.length > 0 || hasAddedItems) ? "done_exceptions" : "done_clean";
-  saveDriverStateLocal_(currentStop.stop_id, {
-    racks_unloaded: racksUnloaded,
-    exceptions: exceptions,
-    added_items: addedItemsPayload,
-    signature_image: signatureImage,
-    signature_skipped_reason: payload.signature_skipped_reason,
-    rack_photo_image: rackPhotoDataUrl,
-    signed_at: payload.submitted_at_iso,
-    status: newStatus,
-  });
-  applyStoredDriverState_();
-
-  // The actual send to the backend (build the PDF, save it to Drive, email
-  // the customer — a real network round-trip that can take several seconds,
-  // longer on a cold Apps Script start) used to be awaited right here, which
-  // is what made the driver stare at a spinner for a couple of seconds on
-  // every single stop. It no longer blocks the screen: every submit — not
-  // just genuine no-signal ones — now goes through the same offline queue
-  // built for that case (see OFFLINE QUEUE below). queueOffline_ persists it
-  // to localStorage immediately (so it survives a crash/reload even before
-  // it's sent), then flushOfflineQueue_ is kicked off WITHOUT awaiting it.
-  // flushOfflineQueue_ already does everything the old inline success/fail
-  // branch used to do — retries on failure, merges pdf_file_id back into
-  // local state so the print button lights up, updates the queue banner,
-  // and shows its own "synced" toast once the backend actually confirms —
-  // so there's nothing left to branch on here.
-  const customerName = currentStop.customer_name;
-  queueOffline_(payload);
-  flushOfflineQueue_();
-  showToast("Saved — sending " + customerName + "'s delivery in the background.");
-
-  isSubmitting = false;
-  currentStop = null;
-  flaggedItems = {};
-  addedItems = {};
-  addItemPanelOpen_ = false;
-  addItemSearchText_ = "";
-  rackPhotoDataUrl = null;
-  renderRouteList_();
-  showScreen_("screen-route");
 }
 
-// ==================================================================
-// PRINT RECEIPT FOR CUSTOMER (built entirely on-device — no backend call)
-// ==================================================================
-// G's ask: a customer standing at the truck who wants a paper copy right
-// then can't wait on the "official" PDF — that one only exists once this
-// stop's submit has actually reached the Apps Script backend (built there
-// via Google Docs, see buildAndSavePdf_ in Code.gs) and synced, which
-// might be minutes away in a dead zone, or might never happen at all if
-// the driver is printing WHILE still deciding whether to sign. So this is
-// a second, independent receipt — built straight from data already on the
-// iPad (currentStop, the in-progress exceptions/signature/rack photo) —
-// deliberately not sharing code with submitStop_'s payload-building even
-// though the two overlap, so this one has zero dependency on the backend
-// ever being reachable. Uses the browser's own native print (Safari's
-// print dialog → any AirPrint printer, or "Save to Files" for a PDF) —
-// no PDF-generation library, so nothing extra to fetch/bundle, and no new
-// failure mode beyond what Safari's print dialog already handles.
-function printReceiptForCustomer_() {
-  if (!currentStop) return;
-
-  const racksUnloaded = currentStop._racksUnloadedEntered != null
-    ? currentStop._racksUnloadedEntered
-    : (currentStop.driver_state && currentStop.driver_state.racks_unloaded);
-
-  // Same shape/cap as submitStop_'s exceptions array — duplicated on
-  // purpose (see the block comment above) rather than shared.
-  const exceptions = Object.values(flaggedItems).map((ex) => {
-    let qtyChange = Number(ex.qty_change);
-    if (!isFinite(qtyChange) || qtyChange < 0) qtyChange = 0;
-    if (qtyChange > ex.qty) qtyChange = ex.qty;
-    return { item_name: ex.item_name, reason: exceptionReasonText_(ex), qty_change: qtyChange, notes: ex.notes };
-  });
-
-  const hasSignature = sigPad.hasStroke;
-  const signatureImage = hasSignature ? document.getElementById("sig-pad").toDataURL("image/png") : null;
-  const skipReasonSelect = document.getElementById("skip-sig-reason-select");
-  const skipReason = skipReasonSelect ? skipReasonSelect.value : "";
-
-  // Added items shown on this on-device receipt the same way the office's
-  // official PDF shows them (see buildAndSavePdf_ in Code.gs) — their own
-  // extra table rows plus a restated line in "Exceptions Noted" (reused
-  // as-is for the "Added" reason rather than a second section) — so a
-  // customer signing on the iPad sees the same total either way, not just
-  // whatever printed before this feature existed.
-  const addedItemsList_ = Object.values(addedItems).map((it) => {
-    let qty = Number(it.qty);
-    if (!isFinite(qty) || qty < 1) qty = 1;
-    return { item_code: it.item_code, item_name: it.item_name, size: it.size || "", qty: qty, unit_price: it.unit_price, notes: it.notes || "" };
-  });
-  const addedItemsForReceipt = addedItemsList_.map((it) => ({ item_code: it.item_code, item_name: it.item_name, size: it.size, qty: it.qty, unit_price: it.unit_price }));
-  const addedItemExceptionLines = addedItemsList_.map((it) => ({ item_name: it.item_name, reason: "Added", qty_change: it.qty, notes: it.notes }));
-
-  const html = buildReceiptHtml_(currentStop, {
-    racksUnloaded: racksUnloaded,
-    exceptions: exceptions.concat(addedItemExceptionLines),
-    hasSignature: hasSignature,
-    signatureImage: signatureImage,
-    skipReason: skipReason,
-    rackPhotoDataUrl: rackPhotoDataUrl,
-    addedItems: addedItemsForReceipt,
-    addedItemsSubtotal: addedItemsSubtotal_(addedItems),
-  });
-
-  // Blob URL + window.open in a new tab, triggered synchronously from the
-  // click handler (no `await` before this point) so Safari doesn't treat
-  // it as a blocked popup. Not revoking the object URL after opening —
-  // the new tab needs it to stay valid for as long as it's open/printing,
-  // and it's one small (tens of KB) URL per print, reclaimed automatically
-  // when that tab is closed or the app reloads. Deliberately not routed
-  // through the backend's ?action=get_pdf endpoint (used by the OTHER
-  // print button on the stop screen, for a stop's already-synced official
-  // PDF) — that endpoint needs a network round trip; this one is the
-  // whole point of not needing one.
-  const blobUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
-  const win = window.open(blobUrl, "_blank");
-  if (!win) {
-    showToast("Couldn't open the print preview — check that pop-ups are allowed for this site.");
+// Same POST shape/timeout convention as sendToBackend_ below, but this one
+// expects a raw PDF blob back instead of a JSON {ok:...} body — see
+// handlePreviewPdf_ in Code.gs, which returns the PDF directly rather than
+// wrapping it in the usual JSON envelope. A backend error still comes back
+// as a normal 200 + JSON body in this app's existing convention (jsonOut_),
+// so checking the response blob's type is how a real PDF is told apart
+// from an error without needing a second response shape.
+async function fetchPdfBlob_(payload) {
+  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_YOUR") === 0) return null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    const res = await fetch(APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (blob.type && blob.type.indexOf("application/json") === 0) return null; // an {ok:false,...} error body, not a PDF
+    return blob;
+  } catch (err) {
+    console.warn("pdf preview fetch failed", err);
+    return null;
   }
-}
-
-// Escapes text pulled from ERP/manifest data or typed in by the driver
-// (exception notes) before it goes into the receipt's HTML string — this
-// receipt is built with template literals, not DOM APIs, so nothing else
-// does this automatically.
-function escapeReceiptHtml_(value) {
-  return String(value == null ? "" : value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function formatPacificTimestamp_(date) {
-  // Explicit Pacific time (business operates in Pacific), not whatever
-  // timezone the driver's iPad happens to be set to.
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric", month: "short", day: "numeric",
-    hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
-  }).format(date) + " (Pacific)";
-}
-
-// Builds a complete, self-contained HTML document (its own <html>/<head>/
-// <body> — this is opened directly as a new page, not injected into the
-// app's own DOM) styled to read like Cascade Tropicals' own delivery
-// note: logo + company info, order info block, items table, Payment
-// Terms/Sub Total/Delivery Total/Total summary, then the same "Delivery
-// Confirmation Details" section (racks/exceptions/signature) as the
-// backend's Docs-generated PDF (see buildAndSavePdf_ in Code.gs) — kept
-// in step with that layout by eye, not by sharing code, since one runs in
-// the browser and the other in Apps Script and can't share functions.
-function buildReceiptHtml_(stop, opts) {
-  const e = escapeReceiptHtml_;
-  const orderNumbers = (stop.orders || []).map((o) => o.order_number);
-  const lineItems = getLineItems_(stop);
-  const addedItems_ = opts.addedItems || [];
-  const totalQty = lineItems.reduce((sum, li) => sum + (Number(li.qty) || 0), 0) +
-    addedItems_.reduce((sum, it) => sum + (Number(it.qty) || 0), 0);
-  // Per G's "Affects the total" (same design as addedItemsSubtotal_'s own
-  // comment) — this receipt's totals fold in the added-items amount on top
-  // of the stop's own invoiced figures, same as submitStop_'s payload does,
-  // so a customer signing on the iPad never sees a total that then changes
-  // once the official PDF/email goes out.
-  const addedAmount = opts.addedItemsSubtotal || 0;
-  const baseSubtotal = getStopSubtotal_(stop);
-  const baseTotal = getStopTotal_(stop);
-  const subtotal = addedAmount > 0 ? (baseSubtotal || 0) + addedAmount : baseSubtotal;
-  const deliveryFee = getStopDeliveryFee_(stop);
-  const total = addedAmount > 0 ? (baseTotal || 0) + addedAmount : baseTotal;
-  const money = (n) => (n != null ? "$" + Number(n).toFixed(2) : null);
-
-  const itemRows = lineItems.map((li) => (
-    "<tr><td>" + e(li.qty != null ? li.qty : "") + "</td><td>" + e(li.item_code || "") +
-    "</td><td>" + e(li.item_name || "") + "</td><td>" + e(li.size || "") + "</td></tr>"
-  )).join("") + addedItems_.map((it) => (
-    // "+N" quantity, no ordered->delivered arrow (there's no ordered qty for
-    // something that wasn't on the order), colored to match the same red
-    // Code.gs's buildAndSavePdf_ uses for an added-item row on the official
-    // PDF (EXCEPTION_RED_, #b3261e) — see .added-row below.
-    "<tr class=\"added-row\"><td>+" + e(it.qty != null ? it.qty : "") + "</td><td>" + e(it.item_code || "") +
-    "</td><td>" + e(it.item_name || "") + "</td><td>" + e(it.size || "") + "</td></tr>"
-  )).join("");
-
-  const summaryLines = [];
-  if (subtotal != null) summaryLines.push(["Sub Total", money(subtotal)]);
-  if (deliveryFee != null) summaryLines.push(["Delivery Total", money(deliveryFee)]);
-  summaryLines.push(["Tax", "$0.00"]); // see the same note in buildAndSavePdf_ — always tax-exempt for this account
-  if (total != null) summaryLines.push(["Total", money(total)]);
-
-  // Heading renamed from "Exceptions Noted" to "Delivery Adjustments" (matching
-  // buildAndSavePdf_'s section name in Code.gs) now that this list can also
-  // hold added items, not just exceptions — "Exceptions Noted" would read
-  // wrong next to a line that says "Added."
-  const exceptionsHtml = opts.exceptions.length > 0
-    ? "<div class=\"section-heading\">Delivery Adjustments</div>" +
-      opts.exceptions.map((ex) => (
-        "<div class=\"ex-line\">- " + e(ex.item_name || "(item)") + ": " + e(ex.reason || "") +
-        (ex.qty_change != null && ex.qty_change !== "" ? " (qty " + e(ex.qty_change) + ")" : "") +
-        (ex.notes ? " — " + e(ex.notes) : "") + "</div>"
-      )).join("")
-    : "<div class=\"section-heading\">Delivery Adjustments</div><div>No exceptions — delivered as invoiced.</div>";
-
-  const signatureHtml = opts.hasSignature && opts.signatureImage
-    ? "<img class=\"sig-img\" src=\"" + opts.signatureImage + "\" alt=\"Customer signature\">"
-    : "<div>" + (opts.skipReason
-        ? "Not captured — " + e(opts.skipReason) + "."
-        : "Signature not yet captured.") + "</div>";
-
-  const rackPhotoHtml = opts.rackPhotoDataUrl
-    ? "<div class=\"section-heading\">Photo of Delivered Rack</div><img class=\"rack-photo\" src=\"" + opts.rackPhotoDataUrl + "\" alt=\"Delivered rack\">"
-    : "";
-
-  return "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">" +
-    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
-    "<title>Delivery Receipt — " + e(stop.customer_name) + "</title>" +
-    "<style>" +
-    "@page { margin: 0.5in; }" +
-    "body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #111; margin: 24px; font-size: 13px; }" +
-    ".header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }" +
-    ".header img { width: 170px; }" +
-    ".company-info { font-size: 11px; margin-top: 6px; line-height: 1.5; }" +
-    ".title { font-size: 22px; font-weight: bold; margin-bottom: 6px; }" +
-    ".order-info { font-size: 11px; text-align: right; line-height: 1.6; }" +
-    ".deliver-to { border: 1px solid #ccc; padding: 8px 10px; margin-bottom: 12px; font-size: 12px; }" +
-    ".deliver-to .label { font-weight: bold; margin-bottom: 4px; }" +
-    "table.items { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 12px; }" +
-    "table.items th, table.items td { border: 0.75px solid #ccc; padding: 5px 6px; text-align: left; }" +
-    "table.items th { background: #e6e6e6; font-weight: bold; }" +
-    "table.items td:first-child, table.items th:first-child { width: 40px; }" +
-    "table.items tr.total-row td { font-weight: bold; }" +
-    "table.items tr.added-row td { color: #b3261e; font-weight: bold; }" +
-    ".summary-wrap { display: flex; justify-content: space-between; margin-bottom: 14px; }" +
-    ".payment-terms .label { font-weight: bold; font-size: 12px; }" +
-    ".summary-lines { text-align: right; font-size: 12px; line-height: 1.7; }" +
-    ".summary-lines .total-line { font-weight: bold; }" +
-    ".section-heading { font-weight: bold; font-size: 14px; margin: 12px 0 4px; }" +
-    ".ex-line { font-size: 12px; margin-bottom: 2px; }" +
-    ".sig-img { width: 220px; display: block; margin-top: 4px; border: 1px solid #ddd; }" +
-    ".rack-photo { width: 300px; display: block; margin-top: 4px; }" +
-    ".footer-note { font-style: italic; font-size: 10px; color: #666; margin-top: 16px; }" +
-    ".on-site-note { font-size: 10px; color: #888; margin-top: 4px; }" +
-    ".no-print { margin-top: 20px; text-align: center; }" +
-    ".no-print button { font-size: 16px; padding: 10px 20px; margin: 0 6px; }" +
-    "@media print { .no-print { display: none; } }" +
-    "</style></head><body>" +
-    "<div class=\"header\">" +
-    "<div><img src=\"" + CT_LOGO_DATA_URL + "\" alt=\"Cascade Tropicals\">" +
-    "<div class=\"company-info\">8711 160th St SE<br>Snohomish, WA 98296, US<br><br>Telephone: 206-623-9549</div></div>" +
-    "<div><div class=\"title\">Delivery Confirmation</div>" +
-    "<div class=\"order-info\">" +
-    "Order Number: " + (orderNumbers.length ? "#" + e(orderNumbers.join(", #")) : "-") + "<br>" +
-    "Account Number: " + e(stop.customer_code || "-") + "<br>" +
-    "Account Name: " + e(stop.customer_name || "-") + "<br>" +
-    "Cart Number: " + e(stop.cart_number || "-") + "<br>" +
-    "Truck: " + e(currentTruck || stop.truck || "-") + "<br>" +
-    "Delivery Date: " + e((manifest && manifest.dispatch_date) || "-") +
-    "</div></div></div>" +
-    "<div class=\"deliver-to\"><div class=\"label\">Deliver To:</div>" +
-    e(stop.customer_name || "") + (stop.address ? "<br>" + e(stop.address) : "") + "</div>" +
-    (lineItems.length > 0
-      ? "<table class=\"items\"><thead><tr><th>Qty</th><th>Item Code</th><th>Item Name</th><th>Size</th></tr></thead><tbody>" +
-        itemRows + "<tr class=\"total-row\"><td>" + e(totalQty) + "</td><td>Total</td><td></td><td></td></tr></tbody></table>"
-      : "") +
-    "<div class=\"summary-wrap\">" +
-    "<div class=\"payment-terms\"><div class=\"label\">Payment Terms</div><div>" + e(stop.payment_terms || "-") + "</div></div>" +
-    "<div class=\"summary-lines\">" + summaryLines.map((l, i) =>
-      "<div" + (i === summaryLines.length - 1 ? " class=\"total-line\"" : "") + ">" + l[0] + ": " + l[1] + "</div>"
-    ).join("") + "</div>" +
-    "</div>" +
-    "<div class=\"section-heading\">Delivery Confirmation Details</div>" +
-    "<div>Racks — Expected: " + e(stop.racks_expected != null ? stop.racks_expected : "-") +
-    "     Unloaded: " + e(opts.racksUnloaded != null ? opts.racksUnloaded : "-") + "</div>" +
-    rackPhotoHtml +
-    exceptionsHtml +
-    "<div class=\"section-heading\">Signature</div>" +
-    signatureHtml +
-    "<div class=\"footer-note\">Printed " + formatPacificTimestamp_(new Date()) + "</div>" +
-    "<div class=\"on-site-note\">Driver-printed copy, produced on-device at the delivery stop.</div>" +
-    "<div class=\"no-print\"><button onclick=\"window.print()\">Print</button><button onclick=\"window.close()\">Close</button></div>" +
-    "<script>window.addEventListener('load', function () { window.print(); });</script>" +
-    "</body></html>";
 }
 
 // Returns the backend's parsed response object on a genuine success

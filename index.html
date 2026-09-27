@@ -11,7 +11,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-09-27j">
+<link rel="stylesheet" href="style.css?v=2026-09-27m">
 </head>
 <body>
 
@@ -95,10 +95,11 @@
 
     <!-- "Print Delivery Note" used to also live here, but per G's "this should
          be option on the next site - its only clicked after everything done
-         before submitting delivery" it's now ONLY on the Signature screen
-         (print-pdf-row-signature below) — that's the point a driver is
+         before submitting delivery" it's ONLY on the Signature screen
+         (print-pdf-row-signature there) — that's the point a driver is
          actually done and about to submit (or reopening an already-delivered
-         stop to reprint), not this entry screen. See openSignatureScreen_. -->
+         stop to reprint), not this entry screen. See openSignatureScreen_/
+         printDeliveryNote_. -->
 
     <div class="section-title">Racks</div>
     <div class="racks-row">
@@ -171,17 +172,20 @@
     <div class="title-wrap"><h1>Signature</h1><div class="sub" id="signature-stop-name"></div></div>
   </header>
   <main>
-    <!-- The ONLY "Print Delivery Note" button in the app now (see the stop
-         screen's HTML comment — it used to also live there) — per G's "this
-         should be option on the next site... only clicked after everything
-         done before submitting delivery," this is that "next site": the
-         last screen before Submit, and also where a driver reprinting an
-         already-delivered stop's official PDF lands after Next from the stop
-         screen. Only shown once this stop has a synced PDF
-         (driver_state.pdf_file_id, set after a successful submit) — so it's
-         invisible on a stop's very first pass through here, and visible any
-         time this stop is reopened after that. See openSignatureScreen_. -->
-    <div class="print-pdf-row hidden" id="print-pdf-row-signature">
+    <!-- The ONLY print button in the app now (see the stop screen's HTML
+         comment — it used to also live there) — per G's "this should be
+         option on the next site... only clicked after everything done
+         before submitting delivery," this is that "next site": the last
+         screen before Submit, and also where a driver reprinting an
+         already-delivered stop's official PDF lands after Next from the
+         stop screen. Always visible now — per G's "it should always print
+         the full edited pdf thats also sent by mail when submitted," this
+         always opens/generates the exact same official PDF regardless of
+         whether this stop has synced yet (see printDeliveryNote_ in
+         app.js — there used to be a second, separate on-device receipt
+         button here too, but G asked for just the one). See
+         openSignatureScreen_. -->
+    <div class="print-pdf-row" id="print-pdf-row-signature">
       <button class="secondary" id="print-pdf-btn-signature">Print Delivery Note</button>
     </div>
 
@@ -210,14 +214,6 @@
     </div>
   </main>
   <div class="bottom-bar">
-    <!-- Builds and prints a customer-facing delivery receipt entirely on
-         the iPad itself (see printReceiptForCustomer_ in app.js) — works
-         with zero signal, unlike the office-emailed PDF further down the
-         line, which only exists once this submit has actually reached the
-         backend. Available any time on this screen, whether or not the
-         driver has signed/submitted yet, so it covers "customer wants a
-         paper copy right now" at the actual moment that comes up. -->
-    <button class="secondary" id="print-receipt-btn">Print Copy for Customer</button>
     <button class="primary" id="submit-btn">Submit Delivery</button>
     <button class="secondary" id="skip-sig-btn">Submit Without Signature</button>
   </div>
@@ -225,9 +221,6 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- Must load before app.js — app.js's printReceiptForCustomer_ references
-     the CT_LOGO_DATA_URL global this file defines. -->
-<script src="logo-data.js?v=2026-09-27j"></script>
-<script src="app.js?v=2026-09-27j"></script>
+<script src="app.js?v=2026-09-27m"></script>
 </body>
 </html>

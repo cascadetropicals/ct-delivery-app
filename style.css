@@ -467,9 +467,19 @@ canvas#sig-pad { width: 100%; height: 220px; background: #fff; border: 2px dashe
    phone still clear the last item in a scrolled list underneath. */
 #screen-stop main, #screen-exceptions main, #screen-signature main { padding-bottom: 190px; }
 
+/* Real bug found via G's "i click submit and literally nothing happens" —
+   this had no z-index, so on every screen with a .bottom-bar (Next:
+   Signature / Submit Delivery / Submit Without Signature), the bottom-bar's
+   own z-index: 50 (opaque white background, pinned to the same bottom edge)
+   painted OVER this toast every time, even though it was firing correctly
+   the whole time — e.g. "Pick a reason for the missing signature before
+   submitting." when tapping Submit Delivery with nothing drawn and no skip
+   reason picked. The toast was never actually missing, just invisible.
+   z-index here must always stay above .bottom-bar's, or any future toast on
+   a bottom-bar screen silently breaks the same way again. */
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: #1a1a1a; color: #fff; padding: 12px 20px; border-radius: 10px; font-size: 15px; opacity: 0;
-  transition: opacity 0.25s; pointer-events: none;
+  transition: opacity 0.25s; pointer-events: none; z-index: 200;
 }
 .toast.show { opacity: 1; }
