@@ -11,7 +11,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-09-27b">
+<link rel="stylesheet" href="style.css?v=2026-09-27e">
 </head>
 <body>
 
@@ -97,14 +97,12 @@
          as the driver edits racks). Phone number pending — see PROJECT-NOTES.md. -->
     <div id="stop-notes"></div>
 
-    <!-- Shown only once this stop already has a signed PDF (driver_state.pdf_file_id,
-         set after a successful submit — see app.js openStopScreen_/submitStop_).
-         Opens the PDF via the backend's ?action=get_pdf endpoint so the driver
-         can print it (Safari's Share icon > Print, to any AirPrint printer)
-         without ever needing a Google login on the iPad. -->
-    <div class="print-pdf-row hidden" id="print-pdf-row">
-      <button class="secondary" id="print-pdf-btn">Print Delivery Note</button>
-    </div>
+    <!-- "Print Delivery Note" used to also live here, but per G's "this should
+         be option on the next site - its only clicked after everything done
+         before submitting delivery" it's now ONLY on the Signature screen
+         (print-pdf-row-signature below) — that's the point a driver is
+         actually done and about to submit (or reopening an already-delivered
+         stop to reprint), not this entry screen. See openSignatureScreen_. -->
 
     <div class="section-title">Racks</div>
     <div class="racks-row">
@@ -125,11 +123,16 @@
          function, buttons to quick filter 2in, 4in" and "Make possible to
          count items." These only ever change what's displayed/ordered in the
          list below — they never touch a flagged exception's own data. See
-         wireStopScreen/renderItemToolbar_/renderItemPickList_ in app.js. -->
+         wireStopScreen/renderItemToolbar_/renderItemPickList_ in app.js.
+         Filters + Count Items share one small, low-emphasis row below the
+         search box — per G's "some where small," neither is used often
+         enough to earn a full-width button like the ones above. -->
     <div class="item-toolbar">
       <input type="text" id="item-search-input" class="item-search-input" placeholder="Search items&hellip;">
-      <div class="size-filter-row hidden" id="size-filter-row"></div>
-      <button type="button" class="secondary" id="count-items-toggle-btn">Count Items</button>
+      <div class="item-toolbar-row">
+        <div class="size-filter-row hidden" id="size-filter-row"></div>
+        <button type="button" class="small-btn" id="count-items-toggle-btn">Count Items</button>
+      </div>
     </div>
 
     <p class="hint">Tap a line that was rejected, short, or damaged. Everything else is assumed delivered as invoiced.</p>
@@ -147,13 +150,16 @@
     <div class="title-wrap"><h1>Signature</h1><div class="sub" id="signature-stop-name"></div></div>
   </header>
   <main>
-    <!-- Same "already-synced official PDF" print button as the stop screen
-         (print-pdf-row/print-pdf-btn there) — shown here too, per G's "print
-         delivery note button show on screen where i sign etc," since a
-         driver reopening an already-submitted stop to reprint may go
-         straight to Signature without stopping on the stop screen first.
-         Toggled by the same driver_state.pdf_file_id check — see
-         openSignatureScreen_ in app.js. -->
+    <!-- The ONLY "Print Delivery Note" button in the app now (see the stop
+         screen's HTML comment — it used to also live there) — per G's "this
+         should be option on the next site... only clicked after everything
+         done before submitting delivery," this is that "next site": the
+         last screen before Submit, and also where a driver reprinting an
+         already-delivered stop's official PDF lands after Next from the stop
+         screen. Only shown once this stop has a synced PDF
+         (driver_state.pdf_file_id, set after a successful submit) — so it's
+         invisible on a stop's very first pass through here, and visible any
+         time this stop is reopened after that. See openSignatureScreen_. -->
     <div class="print-pdf-row hidden" id="print-pdf-row-signature">
       <button class="secondary" id="print-pdf-btn-signature">Print Delivery Note</button>
     </div>
@@ -200,7 +206,7 @@
 
 <!-- Must load before app.js — app.js's printReceiptForCustomer_ references
      the CT_LOGO_DATA_URL global this file defines. -->
-<script src="logo-data.js?v=2026-09-27b"></script>
-<script src="app.js?v=2026-09-27b"></script>
+<script src="logo-data.js?v=2026-09-27e"></script>
+<script src="app.js?v=2026-09-27e"></script>
 </body>
 </html>

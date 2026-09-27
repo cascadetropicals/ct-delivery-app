@@ -131,11 +131,16 @@ button.secondary {
 
 .section-title { font-size: 15px; text-transform: uppercase; color: #666; margin: 20px 0 8px; font-weight: 700; }
 
-/* Order note / delivery instructions — set once per stop at the top of the
-   screen (see #stop-notes in openStopScreen_). Styled distinctly from plain
-   .hint text since these are operational details worth noticing right away,
-   not generic instructions. */
-.stop-notes p {
+/* Phone / order note / delivery instructions — set once per stop at the top
+   of the screen (see #stop-notes in openStopScreen_). Styled distinctly from
+   plain .hint text since these are operational details worth noticing right
+   away, not generic instructions.
+   NOTE: this selector was `.stop-notes p` until 2026-09-27, which never
+   actually matched anything — #stop-notes in index.html only ever had an
+   id, no class="stop-notes" — so every note here has been rendering as
+   plain unstyled text this whole time (see G's 2026-09-27 screenshot: no
+   yellow box). Fixed to the id selector below. */
+#stop-notes p {
   background: #fff8e1;
   border-left: 4px solid #d9a441;
   border-radius: 6px;
@@ -143,6 +148,20 @@ button.secondary {
   margin: 0 0 10px;
   font-size: var(--btn-font);
   color: #4a3b0a;
+}
+/* Phone number is a real tel: link (not inert text) so a driver can tap
+   straight into a call from the stop screen — same "make it as easy as
+   possible for him" reasoning as every other tap target in this app. Its
+   own box (green-left, not the yellow used for notes) so it reads as an
+   action, not another instruction to read. */
+#stop-notes p.phone-note {
+  background: #eef6ef;
+  border-left-color: #2f8f4e;
+}
+#stop-notes p.phone-note a {
+  color: #1f6b39;
+  font-weight: 700;
+  text-decoration: none;
 }
 
 .racks-row { display: flex; align-items: center; gap: 16px; background: #fff; padding: var(--btn-pad-v); border-radius: 12px; flex-wrap: wrap; }
@@ -160,24 +179,43 @@ button.secondary {
 }
 
 /* Search + size quick-filters + Count Items toggle, above the item list —
-   see the HTML comment on .item-toolbar in index.html for why these exist. */
+   see the HTML comment on .item-toolbar in index.html for why these exist.
+   The search box stays a full, easy-to-tap field (used on every stop with a
+   longer list); the 2in/4in filters and Count Items share one small,
+   low-emphasis row underneath (.item-toolbar-row) — per G's "some where
+   small," neither is reached for often enough to earn a big button. */
 .item-toolbar { margin-top: 16px; }
 .item-search-input {
   width: 100%; box-sizing: border-box; padding: var(--btn-pad-v) var(--btn-pad-h);
   font-size: var(--btn-font); border: 2px solid #ccc; border-radius: 10px; background: #fff;
 }
-.size-filter-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.item-toolbar-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px;
+}
+.size-filter-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .size-filter-row.hidden { display: none; }
-/* Green outline (not the red used for exception reason-btns) so a size
-   filter never reads as a warning/exception state. */
+/* Small pill buttons, deliberately NOT sized off --btn-font/--btn-pad like
+   the app's main tap targets — these are a rarely-used convenience, not a
+   primary control, so a compact fixed size (not the big-on-iPad/
+   big-on-iPhone scaling the rest of the app uses) is the point. Green
+   outline (not the red used for exception reason-btns) so a size filter
+   never reads as a warning/exception state. */
 .size-filter-btn {
-  flex: 0 1 auto;
-  padding: clamp(10px, 1.8vw, 14px) clamp(16px, 2.6vw, 22px); font-size: var(--btn-font); font-weight: 700;
+  flex: 0 0 auto;
+  padding: 6px 14px; font-size: 14px; font-weight: 700;
   border: 2px solid #2f5233; border-radius: 999px; background: #fff; color: #2f5233; cursor: pointer;
 }
 .size-filter-btn.selected { background: #2f5233; color: #fff; }
-#count-items-toggle-btn { margin-top: 10px; }
-#count-items-toggle-btn.selected { background: #2f5233; color: #fff; border-color: #2f5233; }
+/* Small, muted, auto-width button style — shared by Count Items and any
+   future rarely-used toggle that shouldn't compete with the screen's real
+   primary/secondary buttons for attention. */
+.small-btn {
+  flex: 0 0 auto; width: auto;
+  padding: 6px 14px; font-size: 14px; font-weight: 700;
+  border: 2px solid #999; border-radius: 999px; background: #fff; color: #555; cursor: pointer;
+  margin-left: auto;
+}
+.small-btn.selected { background: #2f5233; color: #fff; border-color: #2f5233; }
 
 /* Each line item is one big tap target (.item-pick-main, a <button> the full
    width of the row) rather than a small separate "Flag" button next to inert
@@ -243,6 +281,18 @@ button.secondary {
   text-align: center;
 }
 .reason-btn.selected { background: #b3261e; color: #fff; }
+
+/* Rejected-only sub-reason dropdown — per G's "when i choose rejected have
+   dropdown with options: damaged leafs, pests, too small." Shown/hidden by
+   buildExceptionInlineForm_ depending on which reason pill is selected,
+   never a separate reason of its own. */
+.reject-detail-row { margin-top: 10px; }
+.reject-detail-row.hidden { display: none; }
+.reject-detail-select {
+  width: 100%; box-sizing: border-box; padding: var(--btn-pad-v) var(--btn-pad-h);
+  font-size: var(--btn-font); font-weight: 700; color: #7a3630;
+  border: 2px solid #b3261e; border-radius: 10px; background: #fff;
+}
 
 .qty-affected-label { display: block; font-size: 13px; color: #7a3630; margin-top: 16px; }
 /* Input first, +/- grouped together as one joined control after it — not

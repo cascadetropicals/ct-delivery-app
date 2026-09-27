@@ -632,15 +632,9 @@ function wireStopScreen() {
     openSignatureScreen_(currentStop);
   });
 
-  document.getElementById("print-pdf-btn").addEventListener("click", () => {
-    const fileId = currentStop && currentStop.driver_state && currentStop.driver_state.pdf_file_id;
-    if (!fileId) return;
-    // Opens the backend's own ?action=get_pdf endpoint (see servePdfForPrint_
-    // in Code.gs) — never the raw Drive link — so this works with no Google
-    // login on the iPad. Safari opens a PDF in its built-in viewer, whose
-    // Share icon includes Print (AirPrint) — no extra print code needed here.
-    window.open(APPS_SCRIPT_URL + "?action=get_pdf&file_id=" + encodeURIComponent(fileId), "_blank");
-  });
+  // "Print Delivery Note" no longer has a button on this screen — see
+  // wireSignatureScreen's print-pdf-btn-signature for the one and only
+  // instance now, per G's "this should be option on the next site."
 }
 
 function openStopScreen_(stop) {
@@ -683,6 +677,21 @@ function openStopScreen_(stop) {
   // innerHTML — this is ERP-sourced text, never trusted as markup.
   const notesBox = document.getElementById("stop-notes");
   notesBox.innerHTML = "";
+  // Phone renders first — "at top" per G's ask — as a real tel: link so a
+  // driver can tap straight into a call rather than reading a number to
+  // dial by hand. Sourced from the "Customer Emails" tab's new phone column
+  // (see getCustomerContactMap_ in Code.gs) — same manual-entry pattern as
+  // that tab's existing emails column, so a stop with nothing entered there
+  // yet just shows no phone line, same as a stop with no order_note.
+  if (stop.phone) {
+    const p = document.createElement("p");
+    p.className = "phone-note";
+    const a = document.createElement("a");
+    a.href = "tel:" + stop.phone.replace(/[^0-9+]/g, "");
+    a.textContent = "Phone: " + stop.phone;
+    p.appendChild(a);
+    notesBox.appendChild(p);
+  }
   if (stop.order_note) {
     const p = document.createElement("p");
     p.textContent = "Order note: " + stop.order_note;
@@ -693,9 +702,6 @@ function openStopScreen_(stop) {
     p.textContent = "Delivery instructions: " + stop.delivery_instructions;
     notesBox.appendChild(p);
   }
-
-  const pdfFileId = stop.driver_state && stop.driver_state.pdf_file_id;
-  document.getElementById("print-pdf-row").classList.toggle("hidden", !pdfFileId);
 
   document.getElementById("racks-expected-label").textContent = stop.racks_expected != null ? stop.racks_expected : "-";
   const racksInput = document.getElementById("racks-unloaded-input");
@@ -815,15 +821,25 @@ function syncCountItemsBtn_() {
 // Called once per openStopScreen_ (not on every renderItemPickList_ render)
 // since a stop's set of sizes never changes mid-visit — only the buttons'
 // "selected" look does, and that's driven by activeSizeFilters_ directly.
+//
+// Only 2in/4in ever get a button — a fixed pair, not one per distinct size
+// this stop happens to carry. G's original ask named exactly these two
+// ("buttons to quick filter 2in, 4in"); the first pass instead built one
+// button per size actually present, which on a stop with a wide size mix
+// (10in/14in/2in/3in/4in/5in/6in/8in) produced a cluttered 8-button row
+// nobody asked for. Either button is simply skipped if this stop has no
+// line item of that size, rather than showing a filter that would always
+// empty the list.
 function renderSizeFilterButtons_(stop) {
   const row = document.getElementById("size-filter-row");
   row.innerHTML = "";
 
-  const sizes = [];
+  const presentSizes = {};
   getLineItems_(stop).forEach((item) => {
     const s = (item.size || "").trim();
-    if (s && sizes.indexOf(s) === -1) sizes.push(s);
+    if (s) presentSizes[s] = true;
   });
+  const sizes = ["2in", "4in"].filter((s) => presentSizes[s]);
 
   if (sizes.length === 0) {
     row.classList.add("hidden");
@@ -860,6 +876,30 @@ function renderItemToolbar_(stop) {
 // openStopScreen_, which calls renderItemPickList_ directly.
 // ==================================================================
 
+// The three top-level exception reasons — per G's 2026-09-27 relabel/trim:
+// "Short" -> "Missing", "Damaged" -> "Shipping Damage", "Substituted" and
+// "Other" removed outright (not just hidden). "Rejected" is the one reason
+// with a further, more specific sub-reason — see REJECT_DETAIL_OPTIONS.
+const EXCEPTION_REASONS = ["Rejected", "Missing", "Shipping Damage"];
+// Only offered/shown when the top-level reason is "Rejected" — per G's "when
+// i choose rejected have dropdown with options: damaged leafs, pests, too
+// small." Optional (a driver can leave it on the placeholder), since not
+// every rejection needs a specific sub-reason on record.
+const REJECT_DETAIL_OPTIONS = ["Damaged leafs", "Pests", "Too small"];
+
+// The one place a flagged item's reason gets turned into the string this
+// app actually displays/stores/submits everywhere (the collapsed/expanded
+// row status, the submit payload, the on-device receipt) — folds in
+// reject_detail when there is one ("Rejected - Pests"), otherwise just the
+// bare top-level reason. ex.reason ITSELF is never this combined string —
+// keeping it exactly one of EXCEPTION_REASONS is what lets the reason pill's
+// own "selected" check (reason === r) keep working once a sub-reason is
+// picked. See buildExceptionInlineForm_/submitStop_/printReceiptForCustomer_.
+function exceptionReasonText_(ex) {
+  if (ex.reason === "Rejected" && ex.reject_detail) return "Rejected - " + ex.reject_detail;
+  return ex.reason;
+}
+
 // Shared by renderItemPickList_ (initial render / on collapse-expand) and
 // buildExceptionInlineForm_ (live updates as the reason pill or qty stepper
 // changes, without rebuilding the whole list — see the call sites for why
@@ -874,7 +914,7 @@ function updateItemPickStatus_(statusEl, ex, expanded) {
     return;
   }
   const qtyPart = "qty " + (ex.qty_change != null ? ex.qty_change : 0);
-  statusEl.textContent = ex.reason + " · " + qtyPart + (expanded ? " ▾" : " ▸");
+  statusEl.textContent = exceptionReasonText_(ex) + " · " + qtyPart + (expanded ? " ▾" : " ▸");
 }
 
 // The whole line is one big tap target (not a separate small "Flag" button),
@@ -985,7 +1025,12 @@ function renderItemPickList_(stop) {
           size: item.size || "",
           qty: item.qty,
           reason: "Rejected",
-          qty_change: item.qty,
+          reject_detail: "", // only meaningful when reason === "Rejected" — see EXCEPTION_REASON_DETAILS
+          // Defaults to 1, not the full ordered qty, per G's "default qty
+          // always only 1" — most flags are "one plant in this line," not
+          // the whole line; the stepper below is still there to bump it up
+          // for the real multi-unit case.
+          qty_change: 1,
           notes: "",
           expanded: true,
         };
@@ -1023,9 +1068,34 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
   form.className = "exception-inline";
   form.addEventListener("click", (e) => e.stopPropagation());
 
+  // Built before reasonRow (not after) so the reason buttons' own click
+  // handlers below can reference it directly — declaration order in this
+  // function, not DOM insertion order (that's set by the appendChild calls
+  // further down, reasonRow first).
+  const rejectDetailRow = document.createElement("div");
+  rejectDetailRow.className = "reject-detail-row" + (ex.reason === "Rejected" ? "" : " hidden");
+  const rejectDetailSelect = document.createElement("select");
+  rejectDetailSelect.className = "reject-detail-select";
+  const placeholderOpt = document.createElement("option");
+  placeholderOpt.value = "";
+  placeholderOpt.textContent = "Why rejected? (optional)";
+  rejectDetailSelect.appendChild(placeholderOpt);
+  REJECT_DETAIL_OPTIONS.forEach((opt) => {
+    const o = document.createElement("option");
+    o.value = opt;
+    o.textContent = opt;
+    if (ex.reject_detail === opt) o.selected = true;
+    rejectDetailSelect.appendChild(o);
+  });
+  rejectDetailSelect.addEventListener("change", () => {
+    ex.reject_detail = rejectDetailSelect.value;
+    updateItemPickStatus_(statusEl, ex, true);
+  });
+  rejectDetailRow.appendChild(rejectDetailSelect);
+
   const reasonRow = document.createElement("div");
   reasonRow.className = "reason-btn-row";
-  ["Rejected", "Short", "Damaged", "Substituted", "Other"].forEach((r) => {
+  EXCEPTION_REASONS.forEach((r) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "reason-btn" + (ex.reason === r ? " selected" : "");
@@ -1034,11 +1104,23 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
       ex.reason = r;
       reasonRow.querySelectorAll(".reason-btn").forEach((b) => b.classList.remove("selected"));
       btn.classList.add("selected");
+      // The sub-reason dropdown only ever applies to "Rejected" — switching
+      // to a different reason clears whatever was picked (rather than
+      // leaving a stale "Pests" silently attached to a "Missing" flag) and
+      // hides the row; switching back to "Rejected" reveals it again, empty.
+      if (r === "Rejected") {
+        rejectDetailRow.classList.remove("hidden");
+      } else {
+        ex.reject_detail = "";
+        rejectDetailSelect.value = "";
+        rejectDetailRow.classList.add("hidden");
+      }
       updateItemPickStatus_(statusEl, ex, true);
     });
     reasonRow.appendChild(btn);
   });
   form.appendChild(reasonRow);
+  form.appendChild(rejectDetailRow);
 
   // Capped at the ordered qty (ex.qty) — can't reject/flag more units of an
   // item than were actually on the order (see PROJECT-NOTES.md — this needs
@@ -1144,9 +1226,8 @@ function wireSignatureScreen() {
   document.getElementById("skip-sig-btn").addEventListener("click", () => submitStop_(false));
   document.getElementById("print-receipt-btn").addEventListener("click", printReceiptForCustomer_);
 
-  // Same official-PDF print button as the stop screen's print-pdf-btn —
-  // duplicated here (not shared) since this screen wires its own controls
-  // independently, same as the rest of this app. See openSignatureScreen_
+  // The official-PDF print button — only ever lives on THIS screen now, per
+  // G's "this should be option on the next site." See openSignatureScreen_
   // for the visibility toggle.
   document.getElementById("print-pdf-btn-signature").addEventListener("click", () => {
     const fileId = currentStop && currentStop.driver_state && currentStop.driver_state.pdf_file_id;
@@ -1162,8 +1243,8 @@ function openSignatureScreen_(stop) {
   document.getElementById("signature-stop-name").textContent = stop.customer_name;
 
   // Shown only once this stop already has a signed PDF synced from a
-  // previous submit (driver_state.pdf_file_id) — same condition as the stop
-  // screen's print-pdf-row, see openStopScreen_.
+  // previous submit (driver_state.pdf_file_id) — invisible on a stop's very
+  // first pass through here, visible any time it's reopened after that.
   const pdfFileId = stop.driver_state && stop.driver_state.pdf_file_id;
   document.getElementById("print-pdf-row-signature").classList.toggle("hidden", !pdfFileId);
 
@@ -1371,7 +1452,7 @@ async function submitStop_(wantsSignature) {
       item_code: ex.item_code,
       item_name: ex.item_name,
       size: ex.size || "",
-      reason: ex.reason,
+      reason: exceptionReasonText_(ex), // folds in the Rejected-only sub-reason, e.g. "Rejected - Pests" — see exceptionReasonText_
       qty_change: qtyChange,
       notes: ex.notes,
     };
@@ -1496,7 +1577,7 @@ function printReceiptForCustomer_() {
     let qtyChange = Number(ex.qty_change);
     if (!isFinite(qtyChange) || qtyChange < 0) qtyChange = 0;
     if (qtyChange > ex.qty) qtyChange = ex.qty;
-    return { item_name: ex.item_name, reason: ex.reason, qty_change: qtyChange, notes: ex.notes };
+    return { item_name: ex.item_name, reason: exceptionReasonText_(ex), qty_change: qtyChange, notes: ex.notes };
   });
 
   const hasSignature = sigPad.hasStroke;
