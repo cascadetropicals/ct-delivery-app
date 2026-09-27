@@ -106,8 +106,13 @@ button.secondary {
   cursor: pointer;
 }
 .stop-card.pending { border-left-color: #d9a520; }
-.stop-card.done-clean { border-left-color: #2f8f4e; }
-.stop-card.done-exceptions { border-left-color: #b3261e; }
+/* Both done states (done_clean and done_exceptions) render identically —
+   green — per G's "mark green if delivered." See the statusToClass_ comment
+   in app.js for why: once the pill always reads "Delivered," a still-red
+   color for the exceptions case looked contradictory. The exceptions detail
+   itself is unaffected — it's still fully recorded in the Sheet/PDF/
+   Exceptions Log, just no longer flagged by this list's color. */
+.stop-card.done { border-left-color: #2f8f4e; }
 .stop-card .time { font-weight: 700; font-size: 14px; color: #2f5233; margin-bottom: 2px; }
 .stop-card .time.unset { color: #999; font-weight: 600; font-style: italic; }
 .stop-card .name { font-weight: 700; font-size: 19px; }
@@ -116,8 +121,7 @@ button.secondary {
   font-size: 12px; font-weight: 700; padding: 6px 10px; border-radius: 999px; text-transform: uppercase;
   background: #eee; color: #555;
 }
-.stop-card.done-clean .status-pill { background: #dcf3e3; color: #1f6b39; }
-.stop-card.done-exceptions .status-pill { background: #fbdedb; color: #8f221a; }
+.stop-card.done .status-pill { background: #dcf3e3; color: #1f6b39; }
 
 .queue-banner {
   background: #fff4cc; color: #7a5b00; padding: 10px 16px; font-size: 14px; text-align: center;

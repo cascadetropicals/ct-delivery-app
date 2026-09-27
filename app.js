@@ -550,17 +550,23 @@ function stopMetaLine_(stop) {
 }
 
 function statusToClass_(status) {
-  if (status === "done_clean") return "done-clean";
-  if (status === "done_exceptions") return "done-exceptions";
+  // Both done states render identically now — green — per G's "mark green
+  // if delivered." Now that the pill's TEXT always says "Delivered" (see
+  // statusToLabel_ below), a still-different RED color for done_exceptions
+  // read as visually contradictory — a card that says "Delivered" but looks
+  // like something's wrong. The done_clean vs done_exceptions distinction
+  // still lives in the data (the Sheet row, the PDF, the Exceptions Log) —
+  // this only changes what color the route list itself shows.
+  if (status === "done_clean" || status === "done_exceptions") return "done";
   return "pending";
 }
 function statusToLabel_(status) {
   // Both done states say "Delivered" — per G's "it should not be labeled
   // differently - its either delivered or not." Once a stop is submitted,
   // the driver's work is done whether or not exceptions were flagged; the
-  // exceptions detail still surfaces via the card's red left-border color
-  // (see statusToClass_/style.css's .done-exceptions rules) and the actual
-  // Sheet/PDF/Exceptions Log records, just never as a different pill label.
+  // exceptions detail still surfaces via the actual Sheet/PDF/Exceptions Log
+  // records (see statusToClass_ above — the route list's own color is now
+  // green for either done state), just never as a different pill label.
   if (status === "done_clean" || status === "done_exceptions") return "Delivered";
   return "Pending";
 }
