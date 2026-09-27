@@ -47,6 +47,7 @@ const PINS_FILE = "pins.json";
 const STORAGE_KEY_STATE = "ct_driver_state_v1";
 const STORAGE_KEY_QUEUE = "ct_offline_queue_v1";
 const STORAGE_KEY_ROUTE_PLAN_CACHE = "ct_route_plan_cache_v1"; // last successfully fetched {manifest, pins}, for offline fallback
+const STORAGE_KEY_ITEMS_CATALOG_CACHE = "ct_items_catalog_cache_v1"; // last successfully fetched items catalog (see loadItemsCatalog_), for offline "Add Item" search after the first load
 
 // ---------- app state ----------
 let manifest = null;
@@ -63,6 +64,17 @@ let countedItems = {};      // idx -> true, when Count Items mode has this row c
 let countModeActive = false; // whether the Count Items per-row checkboxes are currently shown
 let itemSearchText_ = "";   // current text in the item search box (see #item-search-input)
 let activeSizeFilters_ = {}; // {"2 in": true, ...} — sizes currently toggled on as quick filters, OR'd together
+// "Add Item" state — per G's "add the option to add items on the view."
+// See the ADD ITEM section further down for the functions that read/write
+// these. addedItems is keyed by a locally-assigned id (these items have no
+// original line-item index the way flaggedItems' keys do), each value
+// {item_code, item_name, common_name, size, qty, unit_price, notes}.
+let addedItems = {};
+let addedItemIdCounter_ = 0;
+let addItemPanelOpen_ = false;   // whether #add-item-panel is currently shown — preserved on a same-stop back-and-forth, like countModeActive
+let addItemSearchText_ = "";     // current text in #add-item-search-input
+let itemsCatalog_ = null;        // the full ERP items catalog, once fetched — see loadItemsCatalog_. Deliberately module-level (not per-stop): once loaded it's reused for every stop the rest of the shift, not re-fetched each time this panel is opened.
+let itemsCatalogLoadPromise_ = null; // the in-flight fetch, if any — so opening the panel twice quickly doesn't fire two requests
 let sigPad = { ctx: null, drawing: false, hasStroke: false };
 let rackPhotoDataUrl = null; // compressed JPEG data URL of the driver's rack photo for the current stop, or null
 
@@ -612,6 +624,21 @@ function wireStopScreen() {
     if (currentStop) renderItemPickList_(currentStop);
   });
 
+  // "Add Item" toggle + search — per G's "add the option to add items on the
+  // view." See the ADD ITEM section further down for
+  // syncAddItemPanel_/loadItemsCatalog_/renderAddItemResults_/addCatalogItem_.
+  document.getElementById("add-item-toggle-btn").addEventListener("click", () => {
+    addItemPanelOpen_ = !addItemPanelOpen_;
+    syncAddItemPanel_();
+    if (addItemPanelOpen_ && !itemsCatalog_) {
+      loadItemsCatalog_().then(() => { if (addItemPanelOpen_) renderAddItemResults_(); });
+    }
+  });
+  document.getElementById("add-item-search-input").addEventListener("input", (e) => {
+    addItemSearchText_ = e.target.value;
+    renderAddItemResults_();
+  });
+
   // +/- buttons, grouped together on one side of the input (same pattern as
   // the exceptions screen's qty-affected stepper) — no upper cap here, since
   // unloading more or fewer racks than expected is exactly the mismatch
@@ -663,6 +690,14 @@ function openStopScreen_(stop) {
     countModeActive = false;
     itemSearchText_ = "";
     activeSizeFilters_ = {};
+    // Same reasoning again: a genuinely new stop starts with no added items
+    // and the search panel closed, but reopening the SAME stop (e.g. sign ->
+    // back -> forward) must not silently drop an item the driver already
+    // added. itemsCatalog_ itself is untouched here on purpose — it's not
+    // per-stop state, see its declaration comment.
+    addedItems = {};
+    addItemPanelOpen_ = false;
+    addItemSearchText_ = "";
     clearSignaturePad_();
     clearRackPhoto_();
     clearSkipReason_();
@@ -735,6 +770,10 @@ function openStopScreen_(stop) {
   // Item list doubles as the invoice review (each row already shows
   // qty/item/size) and the exception-flagging UI — see renderItemPickList_.
   renderItemPickList_(stop);
+  // Items the driver has added that weren't on the original order — its own
+  // separate list, kept in sync with addedItems here so a same-stop
+  // back-and-forth (see the isNewStop comment above) still shows them.
+  renderAddedItemsList_();
   showScreen_("screen-stop");
 }
 
@@ -776,6 +815,23 @@ function getStopDeliveryFee_(stop) {
   if (stop.delivery_fee != null) return stop.delivery_fee;
   if (stop.orders && stop.orders.length === 1 && stop.orders[0].delivery_fee != null) return stop.orders[0].delivery_fee;
   return null;
+}
+
+// Sums qty * unit_price across the driver's added-items state (an object
+// keyed by locally-assigned id — see its declaration comment). Per G's
+// explicit "Affects the total" — unlike an exception (which only ever
+// lowers a line's own Sub Total and leaves the invoiced Total exactly as it
+// was), an added item raises what's owed, so its dollar amount has to be
+// folded into the printed/emailed total BEFORE it ever reaches Code.gs —
+// see this function's two call sites (submitStop_, buildReceiptHtml_) and
+// the matching design-intent comment on buildAndSavePdf_ in Code.gs, which
+// just displays body.total as given rather than recomputing it.
+function addedItemsSubtotal_(items) {
+  return Object.values(items).reduce((sum, it) => {
+    const unitPrice = it.unit_price != null ? Number(it.unit_price) : 0;
+    const qty = Number(it.qty) || 0;
+    return sum + unitPrice * qty;
+  }, 0);
 }
 
 function renderStopWarnings_(stop) {
@@ -874,6 +930,258 @@ function renderItemToolbar_(stop) {
   document.getElementById("item-search-input").value = itemSearchText_;
   syncCountItemsBtn_();
   renderSizeFilterButtons_(stop);
+  syncAddItemPanel_();
+}
+
+// ==================================================================
+// ADD ITEM — per G's "add the option to add items on the view." A driver
+// searches the on-device items catalog for something not on the original
+// order and adds it. Per G's answers when this was scoped: (1) "Affects the
+// total" — an added item raises the printed/emailed total, via
+// addedItemsSubtotal_ above, not just something logged for office to sort
+// out later; (2) "Search the ERP item catalog" — not freehand text entry,
+// so a driver can't fat-finger an item code/price the way a client-only
+// business rule change of that consequence would need. The catalog itself
+// (buildItemsCatalog_/publishItemsCatalog_/getItemsCatalogForRequest_ in
+// Code.gs) is a separate, lean array — no plant_form/barcode — published
+// daily alongside the route plan and cached here in localStorage, since a
+// driver adding an item needs to search it with zero signal just like
+// everything else in this app.
+// ==================================================================
+
+// Shows/hides #add-item-panel and reflects addItemPanelOpen_/
+// addItemSearchText_ onto the toggle button + search box. Called from
+// renderItemToolbar_ (so a same-stop revisit reopens the panel exactly as
+// the driver left it, same pattern as syncCountItemsBtn_) and directly from
+// the toggle button's own click handler in wireStopScreen.
+function syncAddItemPanel_() {
+  document.getElementById("add-item-panel").classList.toggle("hidden", !addItemPanelOpen_);
+  document.getElementById("add-item-toggle-btn").classList.toggle("selected", addItemPanelOpen_);
+  document.getElementById("add-item-search-input").value = addItemSearchText_;
+  if (addItemPanelOpen_) renderAddItemResults_();
+}
+
+// Fetches the items catalog once (?action=get_items_catalog) and caches it
+// in localStorage, exactly like the route plan cache above — so after the
+// first successful load this shift, "Add Item" keeps working through a dead
+// zone. itemsCatalogLoadPromise_ collapses a fast double-tap of the toggle
+// button into one request instead of two. Returns the catalog array (empty
+// on total failure, never throws) — callers re-render off itemsCatalog_
+// directly rather than this return value, since a second concurrent caller
+// awaiting the same promise needs the same up-to-date module state anyway.
+async function loadItemsCatalog_() {
+  if (itemsCatalog_) return itemsCatalog_;
+  if (itemsCatalogLoadPromise_) return itemsCatalogLoadPromise_;
+  itemsCatalogLoadPromise_ = (async () => {
+    try {
+      const res = await fetch(APPS_SCRIPT_URL + "?action=get_items_catalog", { cache: "no-store" });
+      const json = await res.json();
+      if (json && json.ok === false) throw new Error(json.error || "items catalog not available");
+      itemsCatalog_ = json;
+      try {
+        localStorage.setItem(STORAGE_KEY_ITEMS_CATALOG_CACHE, JSON.stringify(json));
+      } catch (err) {
+        console.warn("could not persist items catalog cache", err);
+      }
+    } catch (err) {
+      console.warn("items catalog fetch failed; falling back to cache", err);
+      try {
+        const cached = localStorage.getItem(STORAGE_KEY_ITEMS_CATALOG_CACHE);
+        itemsCatalog_ = cached ? JSON.parse(cached) : [];
+      } catch (err2) {
+        itemsCatalog_ = [];
+      }
+      if (itemsCatalog_.length === 0) {
+        showToast("Couldn't load the item catalog — check your connection and try again.");
+      }
+    }
+    itemsCatalogLoadPromise_ = null;
+    return itemsCatalog_;
+  })();
+  return itemsCatalogLoadPromise_;
+}
+
+// Renders #add-item-results from itemsCatalog_ + addItemSearchText_. Search
+// is empty until the driver types something — the catalog runs 9,000+ rows,
+// so nothing is listed by default, only matches. Capped at 40 rendered rows:
+// a guard against a too-broad one-letter query producing a huge DOM, not a
+// real limit on what can be found (narrowing the search finds it).
+function renderAddItemResults_() {
+  const box = document.getElementById("add-item-results");
+  box.innerHTML = "";
+
+  if (!itemsCatalog_) {
+    box.innerHTML = '<p class="hint">Loading item catalog&hellip;</p>';
+    return;
+  }
+  if (itemsCatalog_.length === 0) {
+    box.innerHTML = '<p class="hint">Item catalog isn’t available right now — check your connection and reopen this panel.</p>';
+    return;
+  }
+
+  const q = addItemSearchText_.trim().toLowerCase();
+  if (!q) {
+    box.innerHTML = '<p class="hint">Type to search the item catalog.</p>';
+    return;
+  }
+
+  const matches = itemsCatalog_.filter((it) => (
+    (it.item_name || "").toLowerCase().indexOf(q) !== -1 ||
+    (it.common_name || "").toLowerCase().indexOf(q) !== -1 ||
+    (it.item_code || "").toLowerCase().indexOf(q) !== -1
+  )).slice(0, 40);
+
+  if (matches.length === 0) {
+    box.innerHTML = '<p class="hint">No items match your search.</p>';
+    return;
+  }
+
+  matches.forEach((it) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "add-item-result-row";
+
+    const label = document.createElement("span");
+    label.className = "add-item-result-label";
+    label.textContent = it.item_name + (it.size ? " (" + it.size + ")" : "") + (it.common_name ? " — " + it.common_name : "");
+    row.appendChild(label);
+
+    const price = document.createElement("span");
+    price.className = "add-item-result-price";
+    price.textContent = it.unit_price != null ? "$" + Number(it.unit_price).toFixed(2) : "";
+    row.appendChild(price);
+
+    row.addEventListener("click", () => addCatalogItem_(it));
+    box.appendChild(row);
+  });
+}
+
+// Adds a catalog item to addedItems (qty 1) — or, if this exact item_code is
+// already on the added list, just bumps its qty by one instead of creating
+// a second row for it, matching how a driver would think about tapping the
+// same result twice ("one more of these"), not a literal tap-by-tap log.
+function addCatalogItem_(it) {
+  const existing = it.item_code ? Object.values(addedItems).find((a) => a.item_code === it.item_code) : null;
+  if (existing) {
+    existing.qty = (Number(existing.qty) || 0) + 1;
+  } else {
+    const id = "a" + (addedItemIdCounter_++);
+    addedItems[id] = {
+      item_code: it.item_code || "",
+      item_name: it.item_name || "",
+      common_name: it.common_name || "",
+      size: it.size || "",
+      unit_price: it.unit_price != null ? it.unit_price : null,
+      qty: 1,
+      notes: "",
+    };
+  }
+  renderAddedItemsList_();
+  showToast((it.item_name || "Item") + " added.");
+}
+
+// Renders #added-items-list from addedItems — kept as its own separate list
+// from item-pick-list (see the HTML comment on #added-items-section), each
+// row with a qty stepper (same .qty-stepper/.qty-input/.qty-step-group
+// pieces used elsewhere in this app) and a Remove button. The qty
+// stepper updates ex-place (the price span directly, not a full re-render)
+// so typing a multi-digit quantity doesn't lose focus on every keystroke —
+// same reasoning as buildExceptionInlineForm_'s qty field.
+function renderAddedItemsList_() {
+  const section = document.getElementById("added-items-section");
+  const list = document.getElementById("added-items-list");
+  list.innerHTML = "";
+
+  const entries = Object.entries(addedItems);
+  section.classList.toggle("hidden", entries.length === 0);
+  if (entries.length === 0) return;
+
+  entries.forEach(([id, it]) => {
+    const row = document.createElement("div");
+    row.className = "added-item-row";
+
+    const top = document.createElement("div");
+    top.className = "added-item-top";
+    const label = document.createElement("span");
+    label.className = "added-item-label";
+    label.textContent = it.item_name + (it.size ? " (" + it.size + ")" : "");
+    top.appendChild(label);
+    const priceSpan = document.createElement("span");
+    priceSpan.className = "added-item-price";
+    function renderPrice_() {
+      const lineTotal = it.unit_price != null ? Number(it.unit_price) * (Number(it.qty) || 0) : null;
+      priceSpan.textContent = lineTotal != null ? "$" + lineTotal.toFixed(2) : "";
+    }
+    renderPrice_();
+    top.appendChild(priceSpan);
+    row.appendChild(top);
+
+    const stepper = document.createElement("div");
+    stepper.className = "qty-stepper";
+    const minusBtn = document.createElement("button");
+    minusBtn.type = "button";
+    minusBtn.className = "qty-step-btn qty-minus";
+    minusBtn.textContent = "−";
+    minusBtn.setAttribute("aria-label", "Decrease quantity");
+
+    const qtyInput = document.createElement("input");
+    qtyInput.type = "text";
+    qtyInput.inputMode = "numeric";
+    qtyInput.pattern = "[0-9]*";
+    qtyInput.className = "qty-input";
+    qtyInput.value = String(it.qty);
+
+    const plusBtn = document.createElement("button");
+    plusBtn.type = "button";
+    plusBtn.className = "qty-step-btn";
+    plusBtn.textContent = "+";
+    plusBtn.setAttribute("aria-label", "Increase quantity");
+
+    // No upper cap (unlike the exception qty-affected field, which is capped
+    // at the ordered qty) — there's no "ordered qty" ceiling for something
+    // that wasn't on the order at all. Floored at 1 — an added item at qty 0
+    // isn't a thing; Remove below is how a driver takes it back off.
+    function setQty_(n) {
+      if (!isFinite(n) || n < 1) n = 1;
+      it.qty = n;
+      qtyInput.value = String(n);
+      renderPrice_();
+    }
+    minusBtn.addEventListener("click", () => setQty_((Number(it.qty) || 1) - 1));
+    plusBtn.addEventListener("click", () => setQty_((Number(it.qty) || 1) + 1));
+    qtyInput.addEventListener("input", () => {
+      const digitsOnly = qtyInput.value.replace(/[^0-9]/g, "");
+      if (digitsOnly !== qtyInput.value) qtyInput.value = digitsOnly;
+      setQty_(digitsOnly === "" ? 1 : parseInt(digitsOnly, 10));
+    });
+
+    const stepGroup = document.createElement("div");
+    stepGroup.className = "qty-step-group";
+    stepGroup.appendChild(minusBtn);
+    stepGroup.appendChild(plusBtn);
+    stepper.appendChild(qtyInput);
+    stepper.appendChild(stepGroup);
+    row.appendChild(stepper);
+
+    const notesInput = document.createElement("textarea");
+    notesInput.placeholder = "Notes (optional)";
+    notesInput.rows = 2;
+    notesInput.value = it.notes || "";
+    notesInput.addEventListener("input", () => { it.notes = notesInput.value; });
+    row.appendChild(notesInput);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "unflag-btn";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => {
+      delete addedItems[id];
+      renderAddedItemsList_();
+    });
+    row.appendChild(removeBtn);
+
+    list.appendChild(row);
+  });
 }
 
 // ==================================================================
@@ -1464,6 +1772,38 @@ async function submitStop_(wantsSignature) {
     };
   });
 
+  // Same shape Code.gs expects (see the added_items doc comment at the top
+  // of Code.gs) — item_code/item_name/common_name/size carried straight
+  // from the catalog entry the driver picked, qty/notes from what the
+  // driver set on the Added Items list, unit_price/sub_total computed here
+  // since the catalog doesn't know quantity.
+  const addedItemsPayload = Object.values(addedItems).map((it) => {
+    let qty = Number(it.qty);
+    if (!isFinite(qty) || qty < 1) qty = 1;
+    const unitPrice = it.unit_price != null ? Number(it.unit_price) : null;
+    const subTotal = unitPrice != null ? Number((unitPrice * qty).toFixed(2)) : null;
+    return {
+      item_code: it.item_code || "",
+      item_name: it.item_name || "",
+      common_name: it.common_name || "",
+      size: it.size || "",
+      qty: qty,
+      unit_price: unitPrice,
+      sub_total: subTotal,
+      notes: it.notes || "",
+    };
+  });
+  const hasAddedItems = addedItemsPayload.length > 0;
+  // Per G's "Affects the total" — folded in here, before this ever reaches
+  // Code.gs, so buildAndSavePdf_ can just print body.total/body.subtotal as
+  // given rather than recomputing them (see addedItemsSubtotal_'s own
+  // comment for the full reasoning vs. how exceptions work instead).
+  const addedTotal = addedItemsSubtotal_(addedItems);
+  const baseSubtotal = getStopSubtotal_(currentStop);
+  const baseTotal = getStopTotal_(currentStop);
+  const payloadSubtotal = hasAddedItems ? (baseSubtotal || 0) + addedTotal : baseSubtotal;
+  const payloadTotal = hasAddedItems ? (baseTotal || 0) + addedTotal : baseTotal;
+
   // Everything below racks_unloaded is extra context so the backend (Hour 7)
   // can build a proof-of-delivery PDF without a second lookup — the backend
   // only ever sees a Sheet, not the published route_plan.json file. Deliberately NOT
@@ -1502,10 +1842,11 @@ async function submitStop_(wantsSignature) {
       unit_price: li.unit_price != null ? li.unit_price : null,
       sub_total: li.sub_total != null ? li.sub_total : null,
     })),
-    subtotal: getStopSubtotal_(currentStop),
+    subtotal: payloadSubtotal,
     delivery_fee: getStopDeliveryFee_(currentStop),
-    total: getStopTotal_(currentStop),
+    total: payloadTotal,
     exceptions: exceptions,
+    added_items: addedItemsPayload,
     signature_captured: hasSignature,
     signature_image: signatureImage,
     signature_skipped_reason: hasSignature ? "" : skipReason,
@@ -1514,10 +1855,17 @@ async function submitStop_(wantsSignature) {
     submitted_at_iso: new Date().toISOString(),
   };
 
-  const newStatus = exceptions.length > 0 ? "done_exceptions" : "done_clean";
+  // An added item gets the same "exceptions" local-state status as a
+  // rejected/short/damaged line — both mean this delivery isn't exactly the
+  // clean as-invoiced case, and both are logged to the Exceptions Log the
+  // same way server-side (see handleSubmitStop_ in Code.gs). This no longer
+  // changes the route list's pill COLOR (done_clean/done_exceptions both
+  // render green now — see PROJECT-NOTES.md), only the underlying record.
+  const newStatus = (exceptions.length > 0 || hasAddedItems) ? "done_exceptions" : "done_clean";
   saveDriverStateLocal_(currentStop.stop_id, {
     racks_unloaded: racksUnloaded,
     exceptions: exceptions,
+    added_items: addedItemsPayload,
     signature_image: signatureImage,
     signature_skipped_reason: payload.signature_skipped_reason,
     rack_photo_image: rackPhotoDataUrl,
@@ -1548,6 +1896,9 @@ async function submitStop_(wantsSignature) {
   isSubmitting = false;
   currentStop = null;
   flaggedItems = {};
+  addedItems = {};
+  addItemPanelOpen_ = false;
+  addItemSearchText_ = "";
   rackPhotoDataUrl = null;
   renderRouteList_();
   showScreen_("screen-route");
@@ -1591,13 +1942,29 @@ function printReceiptForCustomer_() {
   const skipReasonSelect = document.getElementById("skip-sig-reason-select");
   const skipReason = skipReasonSelect ? skipReasonSelect.value : "";
 
+  // Added items shown on this on-device receipt the same way the office's
+  // official PDF shows them (see buildAndSavePdf_ in Code.gs) — their own
+  // extra table rows plus a restated line in "Exceptions Noted" (reused
+  // as-is for the "Added" reason rather than a second section) — so a
+  // customer signing on the iPad sees the same total either way, not just
+  // whatever printed before this feature existed.
+  const addedItemsList_ = Object.values(addedItems).map((it) => {
+    let qty = Number(it.qty);
+    if (!isFinite(qty) || qty < 1) qty = 1;
+    return { item_code: it.item_code, item_name: it.item_name, size: it.size || "", qty: qty, unit_price: it.unit_price, notes: it.notes || "" };
+  });
+  const addedItemsForReceipt = addedItemsList_.map((it) => ({ item_code: it.item_code, item_name: it.item_name, size: it.size, qty: it.qty, unit_price: it.unit_price }));
+  const addedItemExceptionLines = addedItemsList_.map((it) => ({ item_name: it.item_name, reason: "Added", qty_change: it.qty, notes: it.notes }));
+
   const html = buildReceiptHtml_(currentStop, {
     racksUnloaded: racksUnloaded,
-    exceptions: exceptions,
+    exceptions: exceptions.concat(addedItemExceptionLines),
     hasSignature: hasSignature,
     signatureImage: signatureImage,
     skipReason: skipReason,
     rackPhotoDataUrl: rackPhotoDataUrl,
+    addedItems: addedItemsForReceipt,
+    addedItemsSubtotal: addedItemsSubtotal_(addedItems),
   });
 
   // Blob URL + window.open in a new tab, triggered synchronously from the
@@ -1652,15 +2019,32 @@ function buildReceiptHtml_(stop, opts) {
   const e = escapeReceiptHtml_;
   const orderNumbers = (stop.orders || []).map((o) => o.order_number);
   const lineItems = getLineItems_(stop);
-  const totalQty = lineItems.reduce((sum, li) => sum + (Number(li.qty) || 0), 0);
-  const subtotal = getStopSubtotal_(stop);
+  const addedItems_ = opts.addedItems || [];
+  const totalQty = lineItems.reduce((sum, li) => sum + (Number(li.qty) || 0), 0) +
+    addedItems_.reduce((sum, it) => sum + (Number(it.qty) || 0), 0);
+  // Per G's "Affects the total" (same design as addedItemsSubtotal_'s own
+  // comment) — this receipt's totals fold in the added-items amount on top
+  // of the stop's own invoiced figures, same as submitStop_'s payload does,
+  // so a customer signing on the iPad never sees a total that then changes
+  // once the official PDF/email goes out.
+  const addedAmount = opts.addedItemsSubtotal || 0;
+  const baseSubtotal = getStopSubtotal_(stop);
+  const baseTotal = getStopTotal_(stop);
+  const subtotal = addedAmount > 0 ? (baseSubtotal || 0) + addedAmount : baseSubtotal;
   const deliveryFee = getStopDeliveryFee_(stop);
-  const total = getStopTotal_(stop);
+  const total = addedAmount > 0 ? (baseTotal || 0) + addedAmount : baseTotal;
   const money = (n) => (n != null ? "$" + Number(n).toFixed(2) : null);
 
   const itemRows = lineItems.map((li) => (
     "<tr><td>" + e(li.qty != null ? li.qty : "") + "</td><td>" + e(li.item_code || "") +
     "</td><td>" + e(li.item_name || "") + "</td><td>" + e(li.size || "") + "</td></tr>"
+  )).join("") + addedItems_.map((it) => (
+    // "+N" quantity, no ordered->delivered arrow (there's no ordered qty for
+    // something that wasn't on the order), colored to match the same red
+    // Code.gs's buildAndSavePdf_ uses for an added-item row on the official
+    // PDF (EXCEPTION_RED_, #b3261e) — see .added-row below.
+    "<tr class=\"added-row\"><td>+" + e(it.qty != null ? it.qty : "") + "</td><td>" + e(it.item_code || "") +
+    "</td><td>" + e(it.item_name || "") + "</td><td>" + e(it.size || "") + "</td></tr>"
   )).join("");
 
   const summaryLines = [];
@@ -1669,14 +2053,18 @@ function buildReceiptHtml_(stop, opts) {
   summaryLines.push(["Tax", "$0.00"]); // see the same note in buildAndSavePdf_ — always tax-exempt for this account
   if (total != null) summaryLines.push(["Total", money(total)]);
 
+  // Heading renamed from "Exceptions Noted" to "Delivery Adjustments" (matching
+  // buildAndSavePdf_'s section name in Code.gs) now that this list can also
+  // hold added items, not just exceptions — "Exceptions Noted" would read
+  // wrong next to a line that says "Added."
   const exceptionsHtml = opts.exceptions.length > 0
-    ? "<div class=\"section-heading\">Exceptions Noted</div>" +
+    ? "<div class=\"section-heading\">Delivery Adjustments</div>" +
       opts.exceptions.map((ex) => (
         "<div class=\"ex-line\">- " + e(ex.item_name || "(item)") + ": " + e(ex.reason || "") +
         (ex.qty_change != null && ex.qty_change !== "" ? " (qty " + e(ex.qty_change) + ")" : "") +
         (ex.notes ? " — " + e(ex.notes) : "") + "</div>"
       )).join("")
-    : "<div class=\"section-heading\">Exceptions Noted</div><div>No exceptions — delivered as invoiced.</div>";
+    : "<div class=\"section-heading\">Delivery Adjustments</div><div>No exceptions — delivered as invoiced.</div>";
 
   const signatureHtml = opts.hasSignature && opts.signatureImage
     ? "<img class=\"sig-img\" src=\"" + opts.signatureImage + "\" alt=\"Customer signature\">"
@@ -1706,6 +2094,7 @@ function buildReceiptHtml_(stop, opts) {
     "table.items th { background: #e6e6e6; font-weight: bold; }" +
     "table.items td:first-child, table.items th:first-child { width: 40px; }" +
     "table.items tr.total-row td { font-weight: bold; }" +
+    "table.items tr.added-row td { color: #b3261e; font-weight: bold; }" +
     ".summary-wrap { display: flex; justify-content: space-between; margin-bottom: 14px; }" +
     ".payment-terms .label { font-weight: bold; font-size: 12px; }" +
     ".summary-lines { text-align: right; font-size: 12px; line-height: 1.7; }" +

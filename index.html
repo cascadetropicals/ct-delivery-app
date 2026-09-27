@@ -11,7 +11,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-09-27f">
+<link rel="stylesheet" href="style.css?v=2026-09-27g">
 </head>
 <body>
 
@@ -132,11 +132,32 @@
       <div class="item-toolbar-row">
         <div class="size-filter-row hidden" id="size-filter-row"></div>
         <button type="button" class="small-btn" id="count-items-toggle-btn">Count Items</button>
+        <button type="button" class="small-btn" id="add-item-toggle-btn">+ Add Item</button>
       </div>
+    </div>
+
+    <!-- "Add Item" — per G's "add the option to add items on the view." A
+         driver searches the on-device items catalog (fetched once, lazily,
+         the first time this panel is opened, and cached offline — see
+         loadItemsCatalog_/ITEMS_CATALOG_CACHE_KEY in app.js), picks one,
+         sets a quantity, and adds it. Hidden until the toggle button above
+         is tapped; see wireAddItemPanel_/renderAddItemResults_. -->
+    <div id="add-item-panel" class="add-item-panel hidden">
+      <input type="text" id="add-item-search-input" class="item-search-input" placeholder="Search the item catalog&hellip;">
+      <div id="add-item-results"></div>
     </div>
 
     <p class="hint">Tap a line that was rejected, short, or damaged. Everything else is assumed delivered as invoiced.</p>
     <div id="item-pick-list"></div>
+
+    <!-- Items a driver added that weren't part of the original order — kept
+         as its own separate list, not mixed into item-pick-list above, since
+         these were never "on the invoice" to tap-and-flag in the first
+         place. See renderAddedItemsList_ in app.js. -->
+    <div id="added-items-section" class="hidden">
+      <div class="section-title">Added Items</div>
+      <div id="added-items-list"></div>
+    </div>
   </main>
   <div class="bottom-bar">
     <button class="primary" id="to-signature-btn" disabled>Next: Signature</button>
@@ -206,7 +227,7 @@
 
 <!-- Must load before app.js — app.js's printReceiptForCustomer_ references
      the CT_LOGO_DATA_URL global this file defines. -->
-<script src="logo-data.js?v=2026-09-27f"></script>
-<script src="app.js?v=2026-09-27f"></script>
+<script src="logo-data.js?v=2026-09-27g"></script>
+<script src="app.js?v=2026-09-27g"></script>
 </body>
 </html>

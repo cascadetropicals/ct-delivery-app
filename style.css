@@ -347,6 +347,52 @@ button.secondary {
 }
 .unflag-btn:active { background: #8f221a; color: #fff; }
 
+/* "Add Item" search panel — per G's "add the option to add items on the
+   view." Deliberately green-accented (the app's brand color, same as
+   .small-btn.selected/.size-filter-btn.selected), NOT the red used for
+   exceptions above: on the driver's OWN screen, adding an item isn't a
+   problem/warning the way a rejected or damaged line is — it's a positive
+   action the driver is taking. (The backend PDF still renders an added item
+   in red — see EXCEPTION_RED_ in Code.gs — because from a billing
+   standpoint it's still a change from what was originally invoiced; the two
+   surfaces are allowed to differ since they're answering different
+   questions — "is something wrong with this delivery" vs. "does the total
+   need a corrected invoice.") */
+.add-item-panel { margin-top: 10px; background: #fff; border: 2px solid #2f5233; border-radius: 10px; padding: 12px; }
+.add-item-panel.hidden { display: none; }
+#add-item-results { margin-top: 10px; max-height: 40vh; overflow-y: auto; }
+.add-item-result-row {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: var(--btn-pad-v) clamp(14px, 2.4vw, 18px); margin-bottom: 8px;
+  font: inherit; text-align: left; cursor: pointer;
+  border: 2px solid #ccc; border-radius: 10px; background: #fff; color: inherit;
+}
+.add-item-result-row:active { background: #eaf3ec; border-color: #2f5233; }
+.add-item-result-label { font-size: clamp(14px, 1.8vw, var(--btn-font)); flex: 1; min-width: 0; }
+.add-item-result-price { font-weight: 700; color: #2f5233; flex-shrink: 0; white-space: nowrap; }
+
+/* Items the driver added, listed separately from item-pick-row above (see
+   the HTML comment on #added-items-section) — a light green tint, matching
+   the same "this is a positive action" reasoning as .add-item-panel, not
+   the red .item-pick-row.flagged look. */
+.added-item-row {
+  background: #eaf3ec; border: 2px solid #2f5233; border-radius: 10px;
+  padding: var(--btn-pad-v) clamp(16px, 2.6vw, 22px); margin-bottom: 10px;
+}
+.added-item-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.added-item-label { font-size: var(--btn-font); font-weight: 700; }
+.added-item-price { font-weight: 700; color: #2f5233; flex-shrink: 0; white-space: nowrap; }
+.added-item-row .qty-stepper { margin-top: 10px; }
+.added-item-row textarea {
+  width: 100%; box-sizing: border-box; padding: 8px; font-size: 15px;
+  border: 1px solid #ccc; border-radius: 6px; margin-top: 10px;
+}
+/* Reuses .unflag-btn's look (outlined, not filled) but in the app's own
+   green rather than the exceptions' red — "Remove" here isn't undoing a
+   flagged problem, it's just taking a just-added item back off. */
+.added-item-row .unflag-btn { border-color: #2f5233; color: #2f5233; margin-top: 10px; }
+.added-item-row .unflag-btn:active { background: #2f5233; color: #fff; }
+
 .photo-box { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
 .photo-preview {
   width: auto;
