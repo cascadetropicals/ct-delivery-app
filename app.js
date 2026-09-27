@@ -56,8 +56,13 @@ let selectedTruck = null;   // truck chosen on login screen, before PIN is confi
 let currentTruck = null;    // truck the driver is logged into
 let truckDriverNames_ = {}; // {"Truck 4": "Jeremy"} — from the same get_trucks payload as the login screen's truck buttons; kept around for the briefing screen's greeting
 let truckStartTimes_ = {};  // {"Truck 4": "6:00 AM"} — same deal, for the briefing screen's "plan is to leave at" line
+let routeStarted_ = false;  // true once "Start Driving" has actually logged a Route Start row this login — reset on each fresh login (see wireLoginScreen). Lets the driver bounce between the briefing screen and "View Stops" (route-back-btn) without logging a second Route Start row for the same drive.
 let currentStop = null;     // the stop object currently open in stop/exceptions/signature screens
 let flaggedItems = {};      // idx -> {item_code, item_name, size, qty, reason, qty_change, notes}
+let countedItems = {};      // idx -> true, when Count Items mode has this row checked off (see renderItemPickList_)
+let countModeActive = false; // whether the Count Items per-row checkboxes are currently shown
+let itemSearchText_ = "";   // current text in the item search box (see #item-search-input)
+let activeSizeFilters_ = {}; // {"2 in": true, ...} — sizes currently toggled on as quick filters, OR'd together
 let sigPad = { ctx: null, drawing: false, hasStroke: false };
 let rackPhotoDataUrl = null; // compressed JPEG data URL of the driver's rack photo for the current stop, or null
 
@@ -367,6 +372,7 @@ function wireLoginScreen() {
     currentTruck = selectedTruck;
     pinInput.value = "";
     loginError.textContent = "";
+    routeStarted_ = false; // fresh login — this driver/truck hasn't tapped Start Driving yet
     openBriefingScreen_();
   });
 }
@@ -382,6 +388,14 @@ function wireLoginScreen() {
 function wireBriefingScreen() {
   document.getElementById("start-driving-btn").addEventListener("click", () => {
     startRoute_();
+  });
+  // Look-only path into the route list — per G's "make so i can view the
+  // stops before starting driving." Deliberately does NOT call startRoute_:
+  // no Route Timing row is logged just for looking. The route screen's own
+  // back button (route-back-btn, wireRouteScreen) is what brings the driver
+  // back here to actually tap Start Driving when they're ready.
+  document.getElementById("view-stops-btn").addEventListener("click", () => {
+    openRouteScreen_();
   });
   // Independent copy of wireRouteScreen()'s logout handler — a driver who
   // taps "Log out" from the briefing screen (before ever tapping Start
@@ -432,6 +446,17 @@ function greetingForPacificTime_() {
 // tapping "Start Driving" should never be blocked by a slow/dead connection,
 // same reasoning as submitStop_.
 function startRoute_() {
+  // With "View Stops" and the route screen's back button now letting a
+  // driver bounce briefing <-> route list before/after actually starting,
+  // "Start Driving" itself must stay idempotent — only the FIRST tap this
+  // login logs a Route Start row; later taps (e.g. after previewing stops,
+  // going back, and tapping Start Driving again) just open the route list.
+  if (routeStarted_) {
+    openRouteScreen_();
+    return;
+  }
+  routeStarted_ = true;
+
   const driverName = truckDriverNames_[currentTruck] || currentTruck;
   const stopCount = manifest.stops.filter((s) => s.truck === currentTruck).length;
   const payload = {
@@ -458,6 +483,9 @@ function wireRouteScreen() {
     document.getElementById("truck-select").querySelectorAll("button").forEach((b) => b.classList.remove("selected"));
     document.getElementById("login-btn").disabled = true;
     showScreen_("screen-login");
+  });
+  document.getElementById("route-back-btn").addEventListener("click", () => {
+    openBriefingScreen_();
   });
 }
 
@@ -554,6 +582,25 @@ function wireStopScreen() {
     renderStopWarnings_();
   });
 
+  // Search box — filters the item list by name as the driver types. Just
+  // re-renders the list on every keystroke; the list is short enough per
+  // stop that this doesn't need debouncing.
+  document.getElementById("item-search-input").addEventListener("input", (e) => {
+    itemSearchText_ = e.target.value;
+    if (currentStop) renderItemPickList_(currentStop);
+  });
+
+  // Count Items toggle — per G's "Make possible to count items... add button
+  // 'count items' -> checkbox to click appears for each row." Toggling this
+  // only shows/hides the per-row checkboxes (renderItemPickList_); it never
+  // clears countedItems, so a driver can turn it off to see the full invoice
+  // view mid-count and turn it back on without losing progress.
+  document.getElementById("count-items-toggle-btn").addEventListener("click", () => {
+    countModeActive = !countModeActive;
+    syncCountItemsBtn_();
+    if (currentStop) renderItemPickList_(currentStop);
+  });
+
   // +/- buttons, grouped together on one side of the input (same pattern as
   // the exceptions screen's qty-affected stepper) — no upper cap here, since
   // unloading more or fewer racks than expected is exactly the mismatch
@@ -601,10 +648,16 @@ function openStopScreen_(stop) {
   currentStop = stop;
   if (isNewStop) {
     flaggedItems = {};
-    // Same reasoning applies to the signature and rack photo: clear them
-    // when starting a genuinely new stop, but leave them alone on a
-    // same-stop back-and-forth (e.g. sign -> back to exceptions -> forward
-    // to signature again shouldn't wipe a signature already captured).
+    // Same reasoning applies to the count-off checkboxes, search text, size
+    // filters, signature, and rack photo: clear them when starting a
+    // genuinely new stop, but leave them alone on a same-stop back-and-forth
+    // (e.g. sign -> back to exceptions -> forward to signature again
+    // shouldn't wipe a signature already captured, or a driver's half-done
+    // item count).
+    countedItems = {};
+    countModeActive = false;
+    itemSearchText_ = "";
+    activeSizeFilters_ = {};
     clearSignaturePad_();
     clearRackPhoto_();
     clearSkipReason_();
@@ -616,6 +669,25 @@ function openStopScreen_(stop) {
   document.getElementById("stop-meta").textContent =
     stop.address + " · Order" + ((stop.orders || []).length === 1 ? "" : "s") + " " + orderNums +
     " · " + (stop.payment_terms || "");
+
+  // Order note + delivery instructions at the top of the screen, per G's
+  // "show order note at top - not just delivery note" — static per-stop
+  // info, set once here rather than in renderStopWarnings_ (which re-runs
+  // on every racks-input keystroke and is for racks-mismatch warnings, a
+  // different, dynamic kind of thing). Built with textContent, not
+  // innerHTML — this is ERP-sourced text, never trusted as markup.
+  const notesBox = document.getElementById("stop-notes");
+  notesBox.innerHTML = "";
+  if (stop.order_note) {
+    const p = document.createElement("p");
+    p.textContent = "Order note: " + stop.order_note;
+    notesBox.appendChild(p);
+  }
+  if (stop.delivery_instructions) {
+    const p = document.createElement("p");
+    p.textContent = "Delivery instructions: " + stop.delivery_instructions;
+    notesBox.appendChild(p);
+  }
 
   const pdfFileId = stop.driver_state && stop.driver_state.pdf_file_id;
   document.getElementById("print-pdf-row").classList.toggle("hidden", !pdfFileId);
@@ -637,6 +709,12 @@ function openStopScreen_(stop) {
   document.getElementById("to-signature-btn").disabled = racksInput.value === "";
 
   renderStopWarnings_();
+  // Search box, size filter buttons, and the Count Items toggle all reflect
+  // this stop's own state (reset above on a genuinely new stop, preserved on
+  // a same-stop back-and-forth) — synced here, before the list itself is
+  // built, since renderItemPickList_ reads itemSearchText_/activeSizeFilters_/
+  // countModeActive but doesn't touch these DOM controls.
+  renderItemToolbar_(stop);
   // Item list doubles as the invoice review (each row already shows
   // qty/item/size) and the exception-flagging UI — see renderItemPickList_.
   renderItemPickList_(stop);
@@ -694,9 +772,9 @@ function renderStopWarnings_(stop) {
   // internal office-side data-quality flags (surfaced to office in the
   // Manifest Draft tab's review_notes column) — never shown to the driver,
   // who can't act on them anyway. Only driver-actionable warnings below.
-  if (stop.delivery_instructions) {
-    warnings.push("Delivery instructions: " + stop.delivery_instructions);
-  }
+  // (delivery_instructions used to be pushed here too, but it's now shown
+  // once, up top, in #stop-notes alongside order_note — see openStopScreen_ —
+  // so it isn't duplicated here.)
 
   const racksInput = document.getElementById("racks-unloaded-input");
   const entered = racksInput.value === "" ? null : Number(racksInput.value);
@@ -710,6 +788,65 @@ function renderStopWarnings_(stop) {
     p.textContent = w;
     box.appendChild(p);
   });
+}
+
+// ==================================================================
+// ITEM LIST TOOLBAR — search box, size quick-filters, Count Items toggle.
+// Per G's "Add search function, buttons to quick filter 2in, 4in" and "Make
+// possible to count items." All three only affect what renderItemPickList_
+// displays/orders below; none of them touch flaggedItems.
+// ==================================================================
+
+// Reflects countModeActive onto the toggle button's own label/selected
+// state. Split out from the click handler so openStopScreen_ (via
+// renderItemToolbar_) can sync it too, since countModeActive is preserved
+// (not reset) on a same-stop back-and-forth.
+function syncCountItemsBtn_() {
+  const btn = document.getElementById("count-items-toggle-btn");
+  btn.textContent = countModeActive ? "Done Counting" : "Count Items";
+  btn.classList.toggle("selected", countModeActive);
+}
+
+// Called once per openStopScreen_ (not on every renderItemPickList_ render)
+// since a stop's set of sizes never changes mid-visit — only the buttons'
+// "selected" look does, and that's driven by activeSizeFilters_ directly.
+function renderSizeFilterButtons_(stop) {
+  const row = document.getElementById("size-filter-row");
+  row.innerHTML = "";
+
+  const sizes = [];
+  getLineItems_(stop).forEach((item) => {
+    const s = (item.size || "").trim();
+    if (s && sizes.indexOf(s) === -1) sizes.push(s);
+  });
+
+  if (sizes.length === 0) {
+    row.classList.add("hidden");
+    return;
+  }
+  row.classList.remove("hidden");
+
+  sizes.forEach((size) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "size-filter-btn" + (activeSizeFilters_[size] ? " selected" : "");
+    btn.textContent = size;
+    // Multiple sizes can be active at once (OR'd together in
+    // renderItemPickList_) — tapping just toggles this one size on/off,
+    // same pattern as a reason-btn but without the mutual exclusivity.
+    btn.addEventListener("click", () => {
+      activeSizeFilters_[size] = !activeSizeFilters_[size];
+      btn.classList.toggle("selected", !!activeSizeFilters_[size]);
+      renderItemPickList_(stop);
+    });
+    row.appendChild(btn);
+  });
+}
+
+function renderItemToolbar_(stop) {
+  document.getElementById("item-search-input").value = itemSearchText_;
+  syncCountItemsBtn_();
+  renderSizeFilterButtons_(stop);
 }
 
 // ==================================================================
@@ -744,14 +881,71 @@ function updateItemPickStatus_(statusEl, ex, expanded) {
 // the row click handler below and buildExceptionInlineForm_'s "Remove Flag"
 // button for why that's a separate, deliberate action. See PROJECT-NOTES.md.
 function renderItemPickList_(stop) {
-  const items = getLineItems_(stop);
+  const allItems = getLineItems_(stop);
   const list = document.getElementById("item-pick-list");
   list.innerHTML = "";
 
-  items.forEach((item, idx) => {
+  // Keep each item's original index (flaggedItems/countedItems are keyed by
+  // that original position in allItems, not by position in this filtered/
+  // sorted view) while narrowing down to what search + size filters allow.
+  let visible = allItems.map((item, idx) => ({ item, idx }));
+
+  const q = itemSearchText_.trim().toLowerCase();
+  if (q) {
+    visible = visible.filter(({ item }) => (item.item_name || "").toLowerCase().indexOf(q) !== -1);
+  }
+
+  const activeSizes = Object.keys(activeSizeFilters_).filter((s) => activeSizeFilters_[s]);
+  if (activeSizes.length > 0) {
+    visible = visible.filter(({ item }) => activeSizes.indexOf((item.size || "").trim()) !== -1);
+  }
+
+  // Count Items mode: a checked-off row sinks to the bottom (stable sort —
+  // ties keep their original relative order) so the driver can see at a
+  // glance what's left to count, per G's "checkbox to click appears for each
+  // row -> move to bottom when checked."
+  if (countModeActive) {
+    visible.sort((a, b) => {
+      const aDone = !!countedItems[a.idx];
+      const bDone = !!countedItems[b.idx];
+      if (aDone === bDone) return 0;
+      return aDone ? 1 : -1;
+    });
+  }
+
+  visible.forEach(({ item, idx }) => {
     const flagged = !!flaggedItems[idx];
+    const counted = !!countedItems[idx];
     const row = document.createElement("div");
-    row.className = "item-pick-row" + (flagged ? " flagged" : "");
+    row.className = "item-pick-row" + (flagged ? " flagged" : "") + (counted ? " counted" : "");
+
+    // Wraps the optional checkbox + the main tap target side by side — see
+    // the .item-pick-top CSS comment for why this is its own inner wrapper
+    // rather than making .item-pick-row itself a flex row.
+    const topWrap = document.createElement("div");
+    topWrap.className = "item-pick-top";
+
+    if (countModeActive) {
+      const checkboxLabel = document.createElement("label");
+      checkboxLabel.className = "item-count-checkbox";
+      // Stops the tap from also reaching .item-pick-main's own click
+      // handler, which would flag the line — checking this box should only
+      // ever mean "counted," nothing else.
+      checkboxLabel.addEventListener("click", (e) => e.stopPropagation());
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = counted;
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) {
+          countedItems[idx] = true;
+        } else {
+          delete countedItems[idx];
+        }
+        renderItemPickList_(stop);
+      });
+      checkboxLabel.appendChild(checkbox);
+      topWrap.appendChild(checkboxLabel);
+    }
 
     const main = document.createElement("button");
     main.type = "button";
@@ -793,7 +987,8 @@ function renderItemPickList_(stop) {
       }
       renderItemPickList_(stop);
     });
-    row.appendChild(main);
+    topWrap.appendChild(main);
+    row.appendChild(topWrap);
 
     if (expanded) {
       row.appendChild(buildExceptionInlineForm_(flaggedItems[idx], idx, stop, status));
@@ -802,8 +997,10 @@ function renderItemPickList_(stop) {
     list.appendChild(row);
   });
 
-  if (items.length === 0) {
+  if (allItems.length === 0) {
     list.innerHTML = '<p class="hint">No line items on file for this stop — see the note on the previous screen.</p>';
+  } else if (visible.length === 0) {
+    list.innerHTML = '<p class="hint">No items match your search/filter.</p>';
   }
 }
 
@@ -941,6 +1138,16 @@ function wireSignatureScreen() {
   document.getElementById("submit-btn").addEventListener("click", () => submitStop_(true));
   document.getElementById("skip-sig-btn").addEventListener("click", () => submitStop_(false));
   document.getElementById("print-receipt-btn").addEventListener("click", printReceiptForCustomer_);
+
+  // Same official-PDF print button as the stop screen's print-pdf-btn —
+  // duplicated here (not shared) since this screen wires its own controls
+  // independently, same as the rest of this app. See openSignatureScreen_
+  // for the visibility toggle.
+  document.getElementById("print-pdf-btn-signature").addEventListener("click", () => {
+    const fileId = currentStop && currentStop.driver_state && currentStop.driver_state.pdf_file_id;
+    if (!fileId) return;
+    window.open(APPS_SCRIPT_URL + "?action=get_pdf&file_id=" + encodeURIComponent(fileId), "_blank");
+  });
 }
 
 function openSignatureScreen_(stop) {
@@ -948,6 +1155,13 @@ function openSignatureScreen_(stop) {
   document.getElementById("submit-btn").disabled = false;
   document.getElementById("skip-sig-btn").disabled = false;
   document.getElementById("signature-stop-name").textContent = stop.customer_name;
+
+  // Shown only once this stop already has a signed PDF synced from a
+  // previous submit (driver_state.pdf_file_id) — same condition as the stop
+  // screen's print-pdf-row, see openStopScreen_.
+  const pdfFileId = stop.driver_state && stop.driver_state.pdf_file_id;
+  document.getElementById("print-pdf-row-signature").classList.toggle("hidden", !pdfFileId);
+
   showScreen_("screen-signature");
   // The canvas lives inside a ".screen" that is "display:none" until now, so
   // getBoundingClientRect() would return 0x0 (and toDataURL() an empty image)
@@ -1151,6 +1365,7 @@ async function submitStop_(wantsSignature) {
     return {
       item_code: ex.item_code,
       item_name: ex.item_name,
+      size: ex.size || "",
       reason: ex.reason,
       qty_change: qtyChange,
       notes: ex.notes,
@@ -1174,14 +1389,26 @@ async function submitStop_(wantsSignature) {
     address: currentStop.address || "",
     delivery_time: currentStop.delivery_time || "", // planned time, from the route plan — lets the backend log planned-vs-actual to the Route Timing sheet
     payment_terms: currentStop.payment_terms || "",
+    order_note: currentStop.order_note || "", // shown in the PDF's "Order Notes" box — see buildAndSavePdf_ in Code.gs
     order_numbers: (currentStop.orders || []).map((o) => o.order_number),
     racks_expected: currentStop.racks_expected,
     racks_unloaded: racksUnloaded,
+    // common_name/plant_form/barcode/unit_price/sub_total come from the
+    // route plan's own ERP items-export lookup (see enrichLineItemsWithErpData_
+    // in Code.gs) — carried straight through from what was loaded, not
+    // looked up again here, so the backend PDF builder needs no second
+    // lookup at submit time. Any of these can be blank/null if that item
+    // code wasn't in the export yet — the PDF just leaves that column blank.
     line_items: getLineItems_(currentStop).map((li) => ({
       qty: li.qty,
       item_code: li.item_code || "",
       item_name: li.item_name,
       size: li.size || "",
+      common_name: li.common_name || "",
+      plant_form: li.plant_form || "",
+      barcode: li.barcode || "",
+      unit_price: li.unit_price != null ? li.unit_price : null,
+      sub_total: li.sub_total != null ? li.sub_total : null,
     })),
     subtotal: getStopSubtotal_(currentStop),
     delivery_fee: getStopDeliveryFee_(currentStop),

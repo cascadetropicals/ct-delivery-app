@@ -11,7 +11,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-09-26c">
+<link rel="stylesheet" href="style.css?v=2026-09-27a">
 </head>
 <body>
 
@@ -54,6 +54,11 @@
       <p class="briefing-stat" id="briefing-stop-count"></p>
       <p class="briefing-stat" id="briefing-leave-time"></p>
       <button class="primary" id="start-driving-btn">Start Driving</button>
+      <!-- G's "make so i can view the stops before starting driving" — a
+           look-only path into the route list that does NOT log a route
+           start (see viewStopsPreview_/routeStarted_ in app.js). The route
+           screen's own back button (route-back-btn) returns here. -->
+      <button class="secondary" id="view-stops-btn">View Stops</button>
     </div>
   </main>
 </section>
@@ -61,6 +66,7 @@
 <!-- ROUTE LIST -->
 <section class="screen" id="screen-route">
   <header class="app-bar">
+    <button class="back" id="route-back-btn">&larr; Briefing</button>
     <div class="title-wrap">
       <h1 id="route-truck-title">Truck</h1>
       <div class="sub" id="route-date-sub"></div>
@@ -85,6 +91,12 @@
     </div>
   </header>
   <main>
+    <!-- Order note + delivery instructions, per G's "show order note at top -
+         not just delivery note" — set once per stop in openStopScreen_
+         (static per-stop info, unlike stop-warnings below which re-renders
+         as the driver edits racks). Phone number pending — see PROJECT-NOTES.md. -->
+    <div id="stop-notes"></div>
+
     <!-- Shown only once this stop already has a signed PDF (driver_state.pdf_file_id,
          set after a successful submit — see app.js openStopScreen_/submitStop_).
          Opens the PDF via the backend's ?action=get_pdf endpoint so the driver
@@ -109,6 +121,17 @@
 
     <div id="stop-warnings"></div>
 
+    <!-- Search + size quick-filters + Count Items toggle, per G's "Add search
+         function, buttons to quick filter 2in, 4in" and "Make possible to
+         count items." These only ever change what's displayed/ordered in the
+         list below — they never touch a flagged exception's own data. See
+         wireStopScreen/renderItemToolbar_/renderItemPickList_ in app.js. -->
+    <div class="item-toolbar">
+      <input type="text" id="item-search-input" class="item-search-input" placeholder="Search items&hellip;">
+      <div class="size-filter-row hidden" id="size-filter-row"></div>
+      <button type="button" class="secondary" id="count-items-toggle-btn">Count Items</button>
+    </div>
+
     <p class="hint">Tap a line that was rejected, short, or damaged. Everything else is assumed delivered as invoiced.</p>
     <div id="item-pick-list"></div>
   </main>
@@ -124,8 +147,19 @@
     <div class="title-wrap"><h1>Signature</h1><div class="sub" id="signature-stop-name"></div></div>
   </header>
   <main>
+    <!-- Same "already-synced official PDF" print button as the stop screen
+         (print-pdf-row/print-pdf-btn there) — shown here too, per G's "print
+         delivery note button show on screen where i sign etc," since a
+         driver reopening an already-submitted stop to reprint may go
+         straight to Signature without stopping on the stop screen first.
+         Toggled by the same driver_state.pdf_file_id check — see
+         openSignatureScreen_ in app.js. -->
+    <div class="print-pdf-row hidden" id="print-pdf-row-signature">
+      <button class="secondary" id="print-pdf-btn-signature">Print Delivery Note</button>
+    </div>
+
     <div class="section-title">Photo of Delivered Rack (optional)</div>
-    <p class="hint">Snap a photo of the rack as delivered — useful if a count or condition is ever disputed later.</p>
+    <p class="hint">Snap a photo of each rack that was delivered</p>
     <div class="photo-box">
       <img id="rack-photo-preview" class="photo-preview hidden" alt="Rack photo">
       <input type="file" accept="image/*" capture="environment" id="rack-photo-input" class="hidden">
@@ -134,7 +168,7 @@
     </div>
 
     <div class="section-title">Signature</div>
-    <p class="hint">Have the customer sign below, or skip if they're not available to sign digitally.</p>
+    <p class="hint">Have the customer sign below</p>
     <canvas id="sig-pad"></canvas>
     <button class="secondary" id="clear-sig-btn">Clear</button>
 
@@ -166,7 +200,7 @@
 
 <!-- Must load before app.js — app.js's printReceiptForCustomer_ references
      the CT_LOGO_DATA_URL global this file defines. -->
-<script src="logo-data.js?v=2026-09-26c"></script>
-<script src="app.js?v=2026-09-26c"></script>
+<script src="logo-data.js?v=2026-09-27a"></script>
+<script src="app.js?v=2026-09-27a"></script>
 </body>
 </html>

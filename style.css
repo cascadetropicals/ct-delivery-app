@@ -131,6 +131,20 @@ button.secondary {
 
 .section-title { font-size: 15px; text-transform: uppercase; color: #666; margin: 20px 0 8px; font-weight: 700; }
 
+/* Order note / delivery instructions — set once per stop at the top of the
+   screen (see #stop-notes in openStopScreen_). Styled distinctly from plain
+   .hint text since these are operational details worth noticing right away,
+   not generic instructions. */
+.stop-notes p {
+  background: #fff8e1;
+  border-left: 4px solid #d9a441;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 0 0 10px;
+  font-size: var(--btn-font);
+  color: #4a3b0a;
+}
+
 .racks-row { display: flex; align-items: center; gap: 16px; background: #fff; padding: var(--btn-pad-v); border-radius: 12px; flex-wrap: wrap; }
 .racks-row .expected { font-size: var(--btn-font); color: #444; }
 /* Reuses the same .qty-stepper/.qty-input/.qty-step-group/.qty-step-btn
@@ -145,6 +159,26 @@ button.secondary {
   flex: 0 0 auto; width: clamp(70px, 14vw, 100px);
 }
 
+/* Search + size quick-filters + Count Items toggle, above the item list —
+   see the HTML comment on .item-toolbar in index.html for why these exist. */
+.item-toolbar { margin-top: 16px; }
+.item-search-input {
+  width: 100%; box-sizing: border-box; padding: var(--btn-pad-v) var(--btn-pad-h);
+  font-size: var(--btn-font); border: 2px solid #ccc; border-radius: 10px; background: #fff;
+}
+.size-filter-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.size-filter-row.hidden { display: none; }
+/* Green outline (not the red used for exception reason-btns) so a size
+   filter never reads as a warning/exception state. */
+.size-filter-btn {
+  flex: 0 1 auto;
+  padding: clamp(10px, 1.8vw, 14px) clamp(16px, 2.6vw, 22px); font-size: var(--btn-font); font-weight: 700;
+  border: 2px solid #2f5233; border-radius: 999px; background: #fff; color: #2f5233; cursor: pointer;
+}
+.size-filter-btn.selected { background: #2f5233; color: #fff; }
+#count-items-toggle-btn { margin-top: 10px; }
+#count-items-toggle-btn.selected { background: #2f5233; color: #fff; border-color: #2f5233; }
+
 /* Each line item is one big tap target (.item-pick-main, a <button> the full
    width of the row) rather than a small separate "Flag" button next to inert
    text — easier to hit reliably in a moving truck. A flagged line turns red
@@ -158,8 +192,18 @@ button.secondary {
   border: 2px solid transparent;
 }
 .item-pick-row.flagged { background: #fbdedb; border-color: #b3261e; }
+/* Counted (Count Items mode) is a lighter, non-alarming tint — never shown
+   on top of flagged, since a rejected/short/damaged line still needs to
+   read as an exception first regardless of whether it's also been counted. */
+.item-pick-row.counted:not(.flagged) { background: #eaf3ec; }
+/* Wraps the optional per-row checkbox (Count Items mode) + .item-pick-main
+   side by side. Kept as its own inner flex row rather than making
+   .item-pick-row itself flex, because .exception-inline is appended as a
+   sibling of this wrapper directly under .item-pick-row and needs to stack
+   *below* it, not sit beside it. */
+.item-pick-top { display: flex; align-items: stretch; }
 .item-pick-main {
-  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: var(--btn-pad-v) clamp(16px, 2.6vw, 22px); background: none; border: none; text-align: left; font: inherit; color: inherit; cursor: pointer;
 }
 .item-pick-label { font-size: var(--btn-font); }
@@ -168,6 +212,18 @@ button.secondary {
   letter-spacing: 0.02em; flex-shrink: 0; white-space: nowrap;
 }
 .item-pick-row.flagged .item-pick-status { color: #b3261e; }
+
+/* Checkbox is its own label (not nested inside the .item-pick-main button —
+   an <input> inside a <button> is invalid HTML and unreliable to tap on
+   iPad Safari), placed before it in .item-pick-top instead. Its own click
+   listener stops propagation so tapping it never also triggers the row's
+   flag/expand handler on .item-pick-main. */
+.item-count-checkbox {
+  display: flex; align-items: center; padding-left: clamp(14px, 2.4vw, 20px); flex-shrink: 0;
+}
+.item-count-checkbox input {
+  width: 28px; height: 28px; accent-color: #2f5233; cursor: pointer;
+}
 
 .exception-inline { padding: 0 16px 16px; border-top: 1px solid rgba(179, 38, 30, 0.25); }
 
