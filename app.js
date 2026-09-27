@@ -55,9 +55,12 @@ let pins = null;
 let manifestReadyPromise_ = null; // set once in init() to loadFullRoutePlan_()'s promise; the login button handler awaits this if the driver taps "Start Route" before the full route plan has finished loading in the background — see both places below
 let selectedTruck = null;   // truck chosen on login screen, before PIN is confirmed
 let currentTruck = null;    // truck the driver is logged into
-let truckDriverNames_ = {}; // {"Truck 4": "Jeremy"} — from the same get_trucks payload as the login screen's truck buttons; kept around for the briefing screen's greeting
-let truckStartTimes_ = {};  // {"Truck 4": "6:00 AM"} — same deal, for the briefing screen's "plan is to leave at" line
-let routeStarted_ = false;  // true once "Start Driving" has actually logged a Route Start row this login — reset on each fresh login (see wireLoginScreen). Lets the driver bounce between the briefing screen and "View Stops" (route-back-btn) without logging a second Route Start row for the same drive.
+let truckDriverNames_ = {}; // {"Truck 4": "Jeremy"} — from the same get_trucks payload as the login screen's truck buttons; kept around for the route screen's greeting
+let truckStartTimes_ = {};  // {"Truck 4": "6:00 AM"} — same deal, for the route screen's "plan is to leave at" line
+let routeStarted_ = false;  // true once "Start Driving" has actually logged a Route Start row this login — reset on each fresh login (see wireLoginScreen). Kept idempotent so re-rendering the route screen never double-logs a start.
+let routeEnded_ = false;    // true once "End Route" has actually logged a Route End row this login — reset on each fresh login, same as routeStarted_. See endRoute_.
+let routeStartedAtLocal_ = null; // Date the driver tapped Start Driving, this login — for the on-screen "Route started at ..." line only (the actual logged timestamp lives on the backend). See startRoute_/updateRouteStatusBox_.
+let routeEndedAtLocal_ = null;   // same, for End Route.
 let currentStop = null;     // the stop object currently open in stop/exceptions/signature screens
 let flaggedItems = {};      // idx -> {item_code, item_name, size, qty, reason, qty_change, notes}
 let countedItems = {};      // idx -> true, when Count Items mode has this row checked off (see renderItemPickList_)
@@ -85,7 +88,6 @@ async function init() {
   registerServiceWorker_();
 
   wireLoginScreen();
-  wireBriefingScreen();
   wireRouteScreen();
   wireStopScreen();
   wireSignatureScreen();
@@ -121,6 +123,19 @@ async function init() {
   const cachedPlan = loadRoutePlanCache_();
 
   manifestReadyPromise_ = loadFullRoutePlan_(cachedPlan);
+
+  // Also start warming the items catalog (used by "+ Add Item" on the stop
+  // screen) right away, in the background, alongside the route plan fetch —
+  // per G's "item catalog needs to work offline and should not take any
+  // time to load." This used to only start the first time a driver actually
+  // opened the Add Item panel, which meant a real, visible "Loading item
+  // catalog…" wait mid-delivery, and nothing cached yet if signal dropped
+  // before that first tap. Starting it here means it's almost always already
+  // warm (freshly fetched, or filled in from localStorage — see
+  // loadItemsCatalog_) well before a driver reaches any stop, so opening the
+  // panel later is instant. Fire-and-forget — nothing here awaits it or
+  // blocks login on it finishing.
+  loadItemsCatalog_();
 
   let trucksCacheReason = null; // null | "offline" | "not_published" — same meaning/messaging as before, just now scoped to the trucks fetch instead of the whole route plan
   let trucksData = null;
@@ -162,8 +177,8 @@ async function init() {
 
   document.getElementById("login-date").textContent = formatDispatchDate_(trucksData.dispatch_date);
   renderTruckSelect_(trucksData.trucks || [], trucksData.truck_drivers || {});
-  // Kept around (not just used inline above) for the briefing screen, which
-  // needs the same driver-name/start-time lookups after login.
+  // Kept around (not just used inline above) for the route screen's status
+  // card, which needs the same driver-name/start-time lookups after login.
   truckDriverNames_ = trucksData.truck_drivers || {};
   truckStartTimes_ = trucksData.truck_start_times || {};
   if (trucksCacheReason === "offline") {
@@ -384,60 +399,95 @@ function wireLoginScreen() {
     currentTruck = selectedTruck;
     pinInput.value = "";
     loginError.textContent = "";
-    routeStarted_ = false; // fresh login — this driver/truck hasn't tapped Start Driving yet
-    openBriefingScreen_();
+    // Fresh login — this driver/truck hasn't tapped Start Driving (or End
+    // Route) yet.
+    routeStarted_ = false;
+    routeEnded_ = false;
+    routeStartedAtLocal_ = null;
+    routeEndedAtLocal_ = null;
+    openRouteScreen_();
   });
 }
 
 // ==================================================================
-// BRIEFING SCREEN (shown right after login, before the route list)
+// ROUTE SCREEN (merged "here's your day" briefing + the stop list, per G's
+// "im thinking we could merge the good morning name and the stops page" —
+// used to be two screens (screen-briefing you tapped through, then
+// screen-route); now the greeting/stop-count/leave-time/Start-Driving card
+// sits directly above the stop list on one screen. "Start Driving" stays
+// its own explicit, separately-logged action either way (G's call,
+// confirmed 2026-09-27) — landing here does NOT itself log a route start.
 // ==================================================================
-// G's request: a quick "here's your day" screen before the driver sees any
-// stops, with a "Start Driving" button that's the actual moment the office
-// wants logged as the route's real start time — see startRoute_ below,
-// which writes to the Route Timing sheet via a new start_route action
-// (Code.gs handleStartRoute_), so planned vs. actual can be compared later.
-function wireBriefingScreen() {
-  document.getElementById("start-driving-btn").addEventListener("click", () => {
-    startRoute_();
-  });
-  // Look-only path into the route list — per G's "make so i can view the
-  // stops before starting driving." Deliberately does NOT call startRoute_:
-  // no Route Timing row is logged just for looking. The route screen's own
-  // back button (route-back-btn, wireRouteScreen) is what brings the driver
-  // back here to actually tap Start Driving when they're ready.
-  document.getElementById("view-stops-btn").addEventListener("click", () => {
-    openRouteScreen_();
-  });
-  // Independent copy of wireRouteScreen()'s logout handler — a driver who
-  // taps "Log out" from the briefing screen (before ever tapping Start
-  // Driving) should be able to back out the same way, without this screen
-  // depending on the route screen's button/handler existing.
-  document.getElementById("briefing-logout-btn").addEventListener("click", () => {
+function wireRouteScreen() {
+  document.getElementById("logout-btn").addEventListener("click", () => {
     currentTruck = null;
     selectedTruck = null;
     document.getElementById("truck-select").querySelectorAll("button").forEach((b) => b.classList.remove("selected"));
     document.getElementById("login-btn").disabled = true;
     showScreen_("screen-login");
   });
+  // One button, three states (see updateRouteStatusBox_) — which action a
+  // tap triggers is decided here from the current state rather than baked
+  // into a fixed handler, since the button's job changes as the day goes
+  // on: Start Driving -> End Route -> (disabled) Route Ended.
+  document.getElementById("start-driving-btn").addEventListener("click", () => {
+    if (!routeStarted_) {
+      startRoute_();
+    } else if (!routeEnded_) {
+      endRoute_();
+    }
+    // else: already ended — button is disabled, so a click can't land here.
+  });
 }
 
-function openBriefingScreen_() {
+function openRouteScreen_() {
+  document.getElementById("route-truck-title").textContent = currentTruck;
+  document.getElementById("route-date-sub").textContent = formatDispatchDate_(manifest.dispatch_date);
+  updateRouteStatusBox_();
+  renderRouteList_();
+  showScreen_("screen-route");
+}
+
+// Fills in the greeting/stop-count/leave-time card and puts the Start
+// Driving/End Route button in the right state. Called once when the route
+// screen opens, and again from startRoute_/endRoute_ right after each logs
+// its event — no screen navigation involved either time now that briefing
+// and the stop list are the same screen.
+function updateRouteStatusBox_() {
   const driverName = truckDriverNames_[currentTruck] || currentTruck;
-  document.getElementById("briefing-truck-title").textContent = currentTruck;
-  document.getElementById("briefing-date-sub").textContent = formatDispatchDate_(manifest.dispatch_date);
-  document.getElementById("briefing-greeting").textContent = greetingForPacificTime_() + ", " + driverName + "!";
+  document.getElementById("route-greeting").textContent = greetingForPacificTime_() + ", " + driverName + "!";
 
   const stopCount = manifest.stops.filter((s) => s.truck === currentTruck).length;
-  document.getElementById("briefing-stop-count").textContent =
+  document.getElementById("route-stop-count").textContent =
     "You have " + stopCount + (stopCount === 1 ? " stop" : " stops") + " today.";
 
   const leaveTime = truckStartTimes_[currentTruck];
-  document.getElementById("briefing-leave-time").textContent = leaveTime
+  document.getElementById("route-leave-time").textContent = leaveTime
     ? "The plan is to leave at " + leaveTime + "."
     : "No planned leave time set for " + currentTruck + " today.";
 
-  showScreen_("screen-briefing");
+  const btn = document.getElementById("start-driving-btn");
+  const timingStatus = document.getElementById("route-timing-status");
+  btn.classList.remove("end-route-state");
+  btn.disabled = false;
+
+  if (routeEnded_) {
+    btn.textContent = "Route Ended";
+    btn.disabled = true;
+    timingStatus.textContent =
+      "Route started at " + formatClockPacific_(routeStartedAtLocal_) +
+      " · ended at " + formatClockPacific_(routeEndedAtLocal_) + ".";
+    timingStatus.classList.remove("hidden");
+  } else if (routeStarted_) {
+    btn.textContent = "End Route";
+    btn.classList.add("end-route-state");
+    timingStatus.textContent = "Route started at " + formatClockPacific_(routeStartedAtLocal_) + ".";
+    timingStatus.classList.remove("hidden");
+  } else {
+    btn.textContent = "Start Driving";
+    timingStatus.textContent = "";
+    timingStatus.classList.add("hidden");
+  }
 }
 
 // Checked in Pacific time explicitly (business operates in Pacific), not
@@ -452,22 +502,26 @@ function greetingForPacificTime_() {
   return "Good evening";
 }
 
+// Same Pacific-time-explicit reasoning as greetingForPacificTime_ — used for
+// the on-screen "Route started/ended at ..." line (G's "show on the app
+// when driver started") so it always reads consistent with what actually
+// gets logged to the Route Timing sheet, regardless of the iPad's own
+// clock/timezone setting.
+function formatClockPacific_(date) {
+  if (!date) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles", hour: "numeric", minute: "2-digit", hour12: true,
+  }).format(date);
+}
+
 // Logs the actual route-start time to the Route Timing sheet (best-effort,
-// via the same offline queue as stop submits — see OFFLINE QUEUE below) and
-// moves straight to the route list. Doesn't wait on the network: the driver
-// tapping "Start Driving" should never be blocked by a slow/dead connection,
-// same reasoning as submitStop_.
+// via the same offline queue as stop submits — see OFFLINE QUEUE below).
+// Doesn't wait on the network: the driver tapping "Start Driving" should
+// never be blocked by a slow/dead connection, same reasoning as submitStop_.
 function startRoute_() {
-  // With "View Stops" and the route screen's back button now letting a
-  // driver bounce briefing <-> route list before/after actually starting,
-  // "Start Driving" itself must stay idempotent — only the FIRST tap this
-  // login logs a Route Start row; later taps (e.g. after previewing stops,
-  // going back, and tapping Start Driving again) just open the route list.
-  if (routeStarted_) {
-    openRouteScreen_();
-    return;
-  }
+  if (routeStarted_) return; // idempotent — see the routeStarted_ declaration above
   routeStarted_ = true;
+  routeStartedAtLocal_ = new Date();
 
   const driverName = truckDriverNames_[currentTruck] || currentTruck;
   const stopCount = manifest.stops.filter((s) => s.truck === currentTruck).length;
@@ -478,34 +532,36 @@ function startRoute_() {
     driver_name: driverName,
     stop_count: stopCount,
     planned_leave_time: truckStartTimes_[currentTruck] || "", // for the backend's planned-vs-actual diff (Route Timing sheet)
-    started_at_iso: new Date().toISOString(),
+    started_at_iso: routeStartedAtLocal_.toISOString(),
   };
   queueOffline_(payload);
   flushOfflineQueue_();
-  openRouteScreen_();
+  updateRouteStatusBox_();
 }
 
-// ==================================================================
-// ROUTE LIST SCREEN
-// ==================================================================
-function wireRouteScreen() {
-  document.getElementById("logout-btn").addEventListener("click", () => {
-    currentTruck = null;
-    selectedTruck = null;
-    document.getElementById("truck-select").querySelectorAll("button").forEach((b) => b.classList.remove("selected"));
-    document.getElementById("login-btn").disabled = true;
-    showScreen_("screen-login");
-  });
-  document.getElementById("route-back-btn").addEventListener("click", () => {
-    openBriefingScreen_();
-  });
-}
+// Logs the actual route-end time — G's "change button to ended route... so
+// driver clicks as well when route done for the day," so the office can see
+// a full start-to-end elapsed time for the day in the Route Timing sheet,
+// not just individual stop times. Same idempotent/offline-safe pattern as
+// startRoute_. There's no published planned end time (only a planned leave
+// time), so the backend just logs the actual Pacific timestamp with no
+// planned/diff comparison — see handleEndRoute_ in Code.gs.
+function endRoute_() {
+  if (!routeStarted_ || routeEnded_) return; // can't end a route that hasn't started, or end it twice
+  routeEnded_ = true;
+  routeEndedAtLocal_ = new Date();
 
-function openRouteScreen_() {
-  document.getElementById("route-truck-title").textContent = currentTruck;
-  document.getElementById("route-date-sub").textContent = formatDispatchDate_(manifest.dispatch_date);
-  renderRouteList_();
-  showScreen_("screen-route");
+  const driverName = truckDriverNames_[currentTruck] || currentTruck;
+  const payload = {
+    action: "end_route",
+    date: manifest.dispatch_date,
+    truck: currentTruck,
+    driver_name: driverName,
+    ended_at_iso: routeEndedAtLocal_.toISOString(),
+  };
+  queueOffline_(payload);
+  flushOfflineQueue_();
+  updateRouteStatusBox_();
 }
 
 function renderRouteList_() {
@@ -625,7 +681,13 @@ function wireStopScreen() {
   });
 
   // "Add Item" toggle + search — per G's "add the option to add items on the
-  // view." See the ADD ITEM section further down for
+  // view." The catalog itself is now prefetched way back in init() (see the
+  // comment there), so in the normal case itemsCatalog_ is already populated
+  // by the time this is ever tapped and the panel opens with instant
+  // results, no loading wait. The fetch here is just a defensive fallback
+  // for the rare case a driver opens the panel before that background fetch
+  // has resolved (e.g. tapping through very fast right after login). See the
+  // ADD ITEM section further down for
   // syncAddItemPanel_/loadItemsCatalog_/renderAddItemResults_/addCatalogItem_.
   document.getElementById("add-item-toggle-btn").addEventListener("click", () => {
     addItemPanelOpen_ = !addItemPanelOpen_;
@@ -962,13 +1024,19 @@ function syncAddItemPanel_() {
 }
 
 // Fetches the items catalog once (?action=get_items_catalog) and caches it
-// in localStorage, exactly like the route plan cache above — so after the
-// first successful load this shift, "Add Item" keeps working through a dead
-// zone. itemsCatalogLoadPromise_ collapses a fast double-tap of the toggle
-// button into one request instead of two. Returns the catalog array (empty
-// on total failure, never throws) — callers re-render off itemsCatalog_
-// directly rather than this return value, since a second concurrent caller
-// awaiting the same promise needs the same up-to-date module state anyway.
+// in localStorage, exactly like the route plan cache above — so once it's
+// loaded this shift, "Add Item" keeps working instantly through a dead zone,
+// straight from the cache. Called proactively from init() (see the comment
+// there) so this has almost always already resolved, from cache or a live
+// fetch, well before a driver ever opens the Add Item panel — the call in
+// the toggle button's own click handler is just a defensive fallback for the
+// rare case a driver gets there before this background fetch finishes.
+// itemsCatalogLoadPromise_ collapses concurrent callers (the init() prefetch
+// racing a fast tap of the toggle button, say) into one request instead of
+// two. Returns the catalog array (empty on total failure, never throws) —
+// callers re-render off itemsCatalog_ directly rather than this return
+// value, since a second concurrent caller awaiting the same promise needs
+// the same up-to-date module state anyway.
 async function loadItemsCatalog_() {
   if (itemsCatalog_) return itemsCatalog_;
   if (itemsCatalogLoadPromise_) return itemsCatalogLoadPromise_;
@@ -1060,10 +1128,14 @@ function renderAddItemResults_() {
 // already on the added list, just bumps its qty by one instead of creating
 // a second row for it, matching how a driver would think about tapping the
 // same result twice ("one more of these"), not a literal tap-by-tap log.
+// Either way the row is left expanded (see renderAddedItemsList_) — tapping
+// a search result is the driver asking to set a qty right now, per G's "it
+// needs to show me immediately where i can choose qty."
 function addCatalogItem_(it) {
   const existing = it.item_code ? Object.values(addedItems).find((a) => a.item_code === it.item_code) : null;
   if (existing) {
     existing.qty = (Number(existing.qty) || 0) + 1;
+    existing.expanded = true;
   } else {
     const id = "a" + (addedItemIdCounter_++);
     addedItems[id] = {
@@ -1074,19 +1146,32 @@ function addCatalogItem_(it) {
       unit_price: it.unit_price != null ? it.unit_price : null,
       qty: 1,
       notes: "",
+      expanded: true,
     };
   }
   renderAddedItemsList_();
   showToast((it.item_name || "Item") + " added.");
 }
 
+// Shared by renderAddedItemsList_ (initial render) and buildAddedItemDetail_'s
+// qty stepper (in-place update, so typing doesn't lose input focus) — same
+// "collapsed still shows the useful summary" idea as updateItemPickStatus_
+// for flagged lines. Qty lives here (not in the label) precisely because
+// this is the piece that updates in place as the stepper changes — the
+// label itself is only ever set once, at render time.
+function updateAddedItemStatus_(statusEl, it, expanded) {
+  const lineTotal = it.unit_price != null ? Number(it.unit_price) * (Number(it.qty) || 0) : null;
+  const priceText = lineTotal != null ? "$" + lineTotal.toFixed(2) : "";
+  statusEl.textContent = "Qty " + it.qty + (priceText ? " · " + priceText : "") + " " + (expanded ? "▾" : "▸");
+}
+
 // Renders #added-items-list from addedItems — kept as its own separate list
-// from item-pick-list (see the HTML comment on #added-items-section), each
-// row with a qty stepper (same .qty-stepper/.qty-input/.qty-step-group
-// pieces used elsewhere in this app) and a Remove button. The qty
-// stepper updates ex-place (the price span directly, not a full re-render)
-// so typing a multi-digit quantity doesn't lose focus on every keystroke —
-// same reasoning as buildExceptionInlineForm_'s qty field.
+// from item-pick-list (see the HTML comment on #added-items-section). Each
+// row collapses/expands the same way a flagged line does in
+// renderItemPickList_ (per G's "it should be able to minimize the same way
+// as when i flag items") — the qty stepper/notes/Remove form only shows
+// while that row's own `expanded` flag is true, and tapping the row's main
+// button just toggles it, never removes the item.
 function renderAddedItemsList_() {
   const section = document.getElementById("added-items-section");
   const list = document.getElementById("added-items-list");
@@ -1100,88 +1185,111 @@ function renderAddedItemsList_() {
     const row = document.createElement("div");
     row.className = "added-item-row";
 
-    const top = document.createElement("div");
-    top.className = "added-item-top";
+    const main = document.createElement("button");
+    main.type = "button";
+    main.className = "added-item-main";
+
     const label = document.createElement("span");
     label.className = "added-item-label";
     label.textContent = it.item_name + (it.size ? " (" + it.size + ")" : "");
-    top.appendChild(label);
-    const priceSpan = document.createElement("span");
-    priceSpan.className = "added-item-price";
-    function renderPrice_() {
-      const lineTotal = it.unit_price != null ? Number(it.unit_price) * (Number(it.qty) || 0) : null;
-      priceSpan.textContent = lineTotal != null ? "$" + lineTotal.toFixed(2) : "";
-    }
-    renderPrice_();
-    top.appendChild(priceSpan);
-    row.appendChild(top);
+    main.appendChild(label);
 
-    const stepper = document.createElement("div");
-    stepper.className = "qty-stepper";
-    const minusBtn = document.createElement("button");
-    minusBtn.type = "button";
-    minusBtn.className = "qty-step-btn qty-minus";
-    minusBtn.textContent = "−";
-    minusBtn.setAttribute("aria-label", "Decrease quantity");
+    const status = document.createElement("span");
+    status.className = "added-item-status";
+    updateAddedItemStatus_(status, it, !!it.expanded);
+    main.appendChild(status);
 
-    const qtyInput = document.createElement("input");
-    qtyInput.type = "text";
-    qtyInput.inputMode = "numeric";
-    qtyInput.pattern = "[0-9]*";
-    qtyInput.className = "qty-input";
-    qtyInput.value = String(it.qty);
-
-    const plusBtn = document.createElement("button");
-    plusBtn.type = "button";
-    plusBtn.className = "qty-step-btn";
-    plusBtn.textContent = "+";
-    plusBtn.setAttribute("aria-label", "Increase quantity");
-
-    // No upper cap (unlike the exception qty-affected field, which is capped
-    // at the ordered qty) — there's no "ordered qty" ceiling for something
-    // that wasn't on the order at all. Floored at 1 — an added item at qty 0
-    // isn't a thing; Remove below is how a driver takes it back off.
-    function setQty_(n) {
-      if (!isFinite(n) || n < 1) n = 1;
-      it.qty = n;
-      qtyInput.value = String(n);
-      renderPrice_();
-    }
-    minusBtn.addEventListener("click", () => setQty_((Number(it.qty) || 1) - 1));
-    plusBtn.addEventListener("click", () => setQty_((Number(it.qty) || 1) + 1));
-    qtyInput.addEventListener("input", () => {
-      const digitsOnly = qtyInput.value.replace(/[^0-9]/g, "");
-      if (digitsOnly !== qtyInput.value) qtyInput.value = digitsOnly;
-      setQty_(digitsOnly === "" ? 1 : parseInt(digitsOnly, 10));
-    });
-
-    const stepGroup = document.createElement("div");
-    stepGroup.className = "qty-step-group";
-    stepGroup.appendChild(minusBtn);
-    stepGroup.appendChild(plusBtn);
-    stepper.appendChild(qtyInput);
-    stepper.appendChild(stepGroup);
-    row.appendChild(stepper);
-
-    const notesInput = document.createElement("textarea");
-    notesInput.placeholder = "Notes (optional)";
-    notesInput.rows = 2;
-    notesInput.value = it.notes || "";
-    notesInput.addEventListener("input", () => { it.notes = notesInput.value; });
-    row.appendChild(notesInput);
-
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.className = "unflag-btn";
-    removeBtn.textContent = "Remove";
-    removeBtn.addEventListener("click", () => {
-      delete addedItems[id];
+    main.addEventListener("click", () => {
+      it.expanded = !it.expanded;
       renderAddedItemsList_();
     });
-    row.appendChild(removeBtn);
+    row.appendChild(main);
+
+    if (it.expanded) {
+      row.appendChild(buildAddedItemDetail_(it, id, status));
+    }
 
     list.appendChild(row);
   });
+}
+
+// The qty-stepper/notes/Remove form for one added item — only appended while
+// that row is expanded (see renderAddedItemsList_ above). Stops every click
+// from bubbling up to the row's own main button, which would otherwise
+// collapse the row mid-edit (same pattern as buildExceptionInlineForm_).
+// `status` is that row's own summary span, updated in place on qty changes
+// rather than re-rendering the whole list, so typing a multi-digit quantity
+// doesn't lose input focus.
+function buildAddedItemDetail_(it, id, status) {
+  const detail = document.createElement("div");
+  detail.className = "added-item-detail";
+  detail.addEventListener("click", (e) => e.stopPropagation());
+
+  const stepper = document.createElement("div");
+  stepper.className = "qty-stepper";
+  const minusBtn = document.createElement("button");
+  minusBtn.type = "button";
+  minusBtn.className = "qty-step-btn qty-minus";
+  minusBtn.textContent = "−";
+  minusBtn.setAttribute("aria-label", "Decrease quantity");
+
+  const qtyInput = document.createElement("input");
+  qtyInput.type = "text";
+  qtyInput.inputMode = "numeric";
+  qtyInput.pattern = "[0-9]*";
+  qtyInput.className = "qty-input";
+  qtyInput.value = String(it.qty);
+
+  const plusBtn = document.createElement("button");
+  plusBtn.type = "button";
+  plusBtn.className = "qty-step-btn";
+  plusBtn.textContent = "+";
+  plusBtn.setAttribute("aria-label", "Increase quantity");
+
+  // No upper cap (unlike the exception qty-affected field, which is capped
+  // at the ordered qty) — there's no "ordered qty" ceiling for something
+  // that wasn't on the order at all. Floored at 1 — an added item at qty 0
+  // isn't a thing; Remove below is how a driver takes it back off.
+  function setQty_(n) {
+    if (!isFinite(n) || n < 1) n = 1;
+    it.qty = n;
+    qtyInput.value = String(n);
+    updateAddedItemStatus_(status, it, true);
+  }
+  minusBtn.addEventListener("click", () => setQty_((Number(it.qty) || 1) - 1));
+  plusBtn.addEventListener("click", () => setQty_((Number(it.qty) || 1) + 1));
+  qtyInput.addEventListener("input", () => {
+    const digitsOnly = qtyInput.value.replace(/[^0-9]/g, "");
+    if (digitsOnly !== qtyInput.value) qtyInput.value = digitsOnly;
+    setQty_(digitsOnly === "" ? 1 : parseInt(digitsOnly, 10));
+  });
+
+  const stepGroup = document.createElement("div");
+  stepGroup.className = "qty-step-group";
+  stepGroup.appendChild(minusBtn);
+  stepGroup.appendChild(plusBtn);
+  stepper.appendChild(qtyInput);
+  stepper.appendChild(stepGroup);
+  detail.appendChild(stepper);
+
+  const notesInput = document.createElement("textarea");
+  notesInput.placeholder = "Notes (optional)";
+  notesInput.rows = 2;
+  notesInput.value = it.notes || "";
+  notesInput.addEventListener("input", () => { it.notes = notesInput.value; });
+  detail.appendChild(notesInput);
+
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "unflag-btn";
+  removeBtn.textContent = "Remove";
+  removeBtn.addEventListener("click", () => {
+    delete addedItems[id];
+    renderAddedItemsList_();
+  });
+  detail.appendChild(removeBtn);
+
+  return detail;
 }
 
 // ==================================================================

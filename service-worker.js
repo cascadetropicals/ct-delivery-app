@@ -14,13 +14,13 @@
  * cached shell forever. Same "bump the version string" rule as
  * index.html's ?v=, see the comment there and in PROJECT-NOTES.md.
  */
-const CACHE_NAME = "ct-delivery-shell-v2026-09-27g";
+const CACHE_NAME = "ct-delivery-shell-v2026-09-27j";
 const SHELL_FILES = [
   "./",
   "./index.html",
-  "./style.css?v=2026-09-27g",
-  "./logo-data.js?v=2026-09-27g",
-  "./app.js?v=2026-09-27g",
+  "./style.css?v=2026-09-27j",
+  "./logo-data.js?v=2026-09-27j",
+  "./app.js?v=2026-09-27j",
   "./pins.json",
 ];
 

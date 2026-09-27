@@ -95,10 +95,27 @@ button.secondary {
 }
 .error-msg { color: #b3261e; margin-top: 10px; font-size: 15px; }
 
-.briefing-box { max-width: 380px; margin: 60px auto; text-align: center; }
-.briefing-box h2 { margin-bottom: 20px; }
-.briefing-stat { color: #333; font-size: 18px; margin: 10px 0; }
-.briefing-box button.primary { margin-top: 24px; }
+/* Sits at the top of the merged route screen, above the stop list (used to
+   be its own full-screen "briefing" — see index.html's screen-route
+   comment) — so this is a compact card now, not a centered full-page block. */
+.route-status-box {
+  max-width: 480px; margin: 0 auto 20px; text-align: center;
+  background: #fff; border-radius: 12px; padding: 18px 20px; border: 2px solid #e0e0e0;
+}
+.route-status-box h2 { margin-bottom: 14px; }
+.briefing-stat { color: #333; font-size: 18px; margin: 8px 0; }
+.route-status-box button.primary { margin-top: 18px; }
+/* "Route started at ..." / "Route ended at ..." line — per G's "show on the
+   app when driver started." Distinct color so it reads as a status/receipt,
+   not just another stat line. */
+.route-timing-stat { color: #2f5233; font-weight: 700; }
+/* Button's "End Route" state (routeStarted_ && !routeEnded_) — a different
+   color from the default green primary button so it's visually obvious the
+   tap now means something different (ending the day, not starting it). */
+#start-driving-btn.end-route-state { background: #b3261e; }
+/* Final "Route Ended" state — intentionally left tappable-looking-disabled
+   (see button.primary:disabled above) rather than hidden, so the driver has
+   a persistent on-screen confirmation the day was actually closed out. */
 
 .stop-card {
   background: #fff; border-radius: 12px; padding: 16px 18px; margin-bottom: 14px;
@@ -206,16 +223,20 @@ button.secondary {
    never reads as a warning/exception state. */
 .size-filter-btn {
   flex: 0 0 auto;
-  padding: 6px 14px; font-size: 14px; font-weight: 700;
+  /* Bumped up from a flat 6px/14px per G's "buttons need to be a bit
+     bigger" (2026-09-27) — still deliberately smaller than the app's main
+     tap targets (--btn-font/--btn-pad), just no longer cramped. */
+  padding: 10px 18px; font-size: 16px; font-weight: 700;
   border: 2px solid #2f5233; border-radius: 999px; background: #fff; color: #2f5233; cursor: pointer;
 }
 .size-filter-btn.selected { background: #2f5233; color: #fff; }
 /* Small, muted, auto-width button style — shared by Count Items and any
    future rarely-used toggle that shouldn't compete with the screen's real
-   primary/secondary buttons for attention. */
+   primary/secondary buttons for attention. Bumped alongside .size-filter-btn
+   above, same reason. */
 .small-btn {
   flex: 0 0 auto; width: auto;
-  padding: 6px 14px; font-size: 14px; font-weight: 700;
+  padding: 10px 18px; font-size: 16px; font-weight: 700;
   border: 2px solid #999; border-radius: 999px; background: #fff; color: #555; cursor: pointer;
   margin-left: auto;
 }
@@ -374,24 +395,35 @@ button.secondary {
 /* Items the driver added, listed separately from item-pick-row above (see
    the HTML comment on #added-items-section) — a light green tint, matching
    the same "this is a positive action" reasoning as .add-item-panel, not
-   the red .item-pick-row.flagged look. */
+   the red .item-pick-row.flagged look. Collapses/expands the same way a
+   flagged item-pick-row does — .added-item-main is the full-width tap
+   target (mirrors .item-pick-main), .added-item-detail is the qty/notes/
+   Remove form appended only while expanded (mirrors .exception-inline). */
 .added-item-row {
   background: #eaf3ec; border: 2px solid #2f5233; border-radius: 10px;
-  padding: var(--btn-pad-v) clamp(16px, 2.6vw, 22px); margin-bottom: 10px;
+  overflow: hidden; margin-bottom: 10px;
 }
-.added-item-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.added-item-main {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: var(--btn-pad-v) clamp(16px, 2.6vw, 22px); background: none; border: none;
+  text-align: left; font: inherit; color: inherit; cursor: pointer;
+}
 .added-item-label { font-size: var(--btn-font); font-weight: 700; }
-.added-item-price { font-weight: 700; color: #2f5233; flex-shrink: 0; white-space: nowrap; }
-.added-item-row .qty-stepper { margin-top: 10px; }
-.added-item-row textarea {
+.added-item-status {
+  font-size: clamp(13px, 1.6vw, 15px); font-weight: 700; color: #2f5233;
+  flex-shrink: 0; white-space: nowrap;
+}
+.added-item-detail { padding: 0 clamp(16px, 2.6vw, 22px) var(--btn-pad-v); }
+.added-item-detail .qty-stepper { margin-top: 0; }
+.added-item-detail textarea {
   width: 100%; box-sizing: border-box; padding: 8px; font-size: 15px;
   border: 1px solid #ccc; border-radius: 6px; margin-top: 10px;
 }
 /* Reuses .unflag-btn's look (outlined, not filled) but in the app's own
    green rather than the exceptions' red — "Remove" here isn't undoing a
    flagged problem, it's just taking a just-added item back off. */
-.added-item-row .unflag-btn { border-color: #2f5233; color: #2f5233; margin-top: 10px; }
-.added-item-row .unflag-btn:active { background: #2f5233; color: #fff; }
+.added-item-detail .unflag-btn { border-color: #2f5233; color: #2f5233; margin-top: 10px; }
+.added-item-detail .unflag-btn:active { background: #2f5233; color: #fff; }
 
 .photo-box { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
 .photo-preview {

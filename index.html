@@ -11,7 +11,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-09-27g">
+<link rel="stylesheet" href="style.css?v=2026-09-27j">
 </head>
 <body>
 
@@ -35,45 +35,41 @@
   </main>
 </section>
 
-<!-- BRIEFING (shown right after login, before the route list — G's request:
-     driver should see a quick "here's your day" screen and explicitly tap
-     Start Driving, which is what gets logged as the actual route-start
-     time in the Route Timing sheet, so the office can compare planned vs
-     actual. See openBriefingScreen_/startRoute_ in app.js. -->
-<section class="screen" id="screen-briefing">
-  <header class="app-bar">
-    <div class="title-wrap">
-      <h1 id="briefing-truck-title">Truck</h1>
-      <div class="sub" id="briefing-date-sub"></div>
-    </div>
-    <button class="logout-btn" id="briefing-logout-btn">Log out</button>
-  </header>
-  <main>
-    <div class="briefing-box">
-      <h2 id="briefing-greeting">Good morning</h2>
-      <p class="briefing-stat" id="briefing-stop-count"></p>
-      <p class="briefing-stat" id="briefing-leave-time"></p>
-      <button class="primary" id="start-driving-btn">Start Driving</button>
-      <!-- G's "make so i can view the stops before starting driving" — a
-           look-only path into the route list that does NOT log a route
-           start (see viewStopsPreview_/routeStarted_ in app.js). The route
-           screen's own back button (route-back-btn) returns here. -->
-      <button class="secondary" id="view-stops-btn">View Stops</button>
-    </div>
-  </main>
-</section>
-
-<!-- ROUTE LIST -->
+<!-- ROUTE (merged briefing + stop list per G's "merge the good morning name
+     and the stops page" — the greeting/stop-count/leave-time/Start Driving
+     block used to be its own screen-briefing the driver had to tap through;
+     it now sits directly above the stop list on this one screen. "Start
+     Driving" is still its own explicit, separately-logged action (G's
+     call, confirmed 2026-09-27) — landing here or just seeing the list does
+     NOT log a route start; only tapping the button does (see startRoute_).
+     That same button then turns into "End Route" once the drive has
+     started, per G's "change button to ended route... driver clicks when
+     route done for the day" — see updateRouteStatusBox_/endRoute_. -->
 <section class="screen" id="screen-route">
   <header class="app-bar">
-    <button class="back" id="route-back-btn">&larr; Briefing</button>
     <div class="title-wrap">
       <h1 id="route-truck-title">Truck</h1>
       <div class="sub" id="route-date-sub"></div>
     </div>
     <button class="logout-btn" id="logout-btn">Log out</button>
   </header>
-  <main id="route-list"></main>
+  <main>
+    <div class="route-status-box" id="route-status-box">
+      <h2 id="route-greeting">Good morning</h2>
+      <p class="briefing-stat" id="route-stop-count"></p>
+      <p class="briefing-stat" id="route-leave-time"></p>
+      <!-- Text only, shown once Start Driving / End Route has actually been
+           tapped — per G's "show on the app when driver started." Blank/
+           hidden before Start Driving is tapped. -->
+      <p class="briefing-stat route-timing-stat hidden" id="route-timing-status"></p>
+      <!-- One button, three states, driven entirely by JS
+           (updateRouteStatusBox_): "Start Driving" -> logs start_route and
+           flips to "End Route" -> logs end_route and flips to a disabled
+           "Route Ended" label. See startRoute_/endRoute_. -->
+      <button class="primary" id="start-driving-btn">Start Driving</button>
+    </div>
+    <div id="route-list"></div>
+  </main>
 </section>
 
 <!-- STOP DETAIL + EXCEPTIONS — merged into one screen per G's request ("these
@@ -147,17 +143,21 @@
       <div id="add-item-results"></div>
     </div>
 
-    <p class="hint">Tap a line that was rejected, short, or damaged. Everything else is assumed delivered as invoiced.</p>
-    <div id="item-pick-list"></div>
-
     <!-- Items a driver added that weren't part of the original order — kept
-         as its own separate list, not mixed into item-pick-list above, since
+         as its own separate list, not mixed into item-pick-list below, since
          these were never "on the invoice" to tap-and-flag in the first
-         place. See renderAddedItemsList_ in app.js. -->
+         place. See renderAddedItemsList_ in app.js. Placed directly under
+         the Add Item panel above (not after the full order list below) so a
+         driver who just tapped a search result sees the new item and its
+         qty control right away, without scrolling past the whole order —
+         per G's "it needs to show me immediately where i can choose qty." -->
     <div id="added-items-section" class="hidden">
       <div class="section-title">Added Items</div>
       <div id="added-items-list"></div>
     </div>
+
+    <p class="hint">Tap a line that was rejected, short, or damaged. Everything else is assumed delivered as invoiced.</p>
+    <div id="item-pick-list"></div>
   </main>
   <div class="bottom-bar">
     <button class="primary" id="to-signature-btn" disabled>Next: Signature</button>
@@ -227,7 +227,7 @@
 
 <!-- Must load before app.js — app.js's printReceiptForCustomer_ references
      the CT_LOGO_DATA_URL global this file defines. -->
-<script src="logo-data.js?v=2026-09-27g"></script>
-<script src="app.js?v=2026-09-27g"></script>
+<script src="logo-data.js?v=2026-09-27j"></script>
+<script src="app.js?v=2026-09-27j"></script>
 </body>
 </html>
