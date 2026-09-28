@@ -50,6 +50,19 @@ const STORAGE_KEY_ROUTE_PLAN_CACHE = "ct_route_plan_cache_v1"; // last successfu
 const STORAGE_KEY_ROUTE_TIMING_STATE = "ct_route_timing_state_v1"; // routeStarted_/routeEnded_ + their timestamps, keyed to today's truck+date — see restoreRouteTimingStateLocal_
 const STORAGE_KEY_ITEMS_CATALOG_CACHE = "ct_items_catalog_cache_v1"; // last successfully fetched items catalog (see loadItemsCatalog_), for offline "Add Item" search after the first load
 
+// Native-storage keys for the iOS app's background sync (see NATIVE
+// BACKGROUND SYNC, near the OFFLINE QUEUE section below) — these are NOT
+// localStorage keys, they're written/read via the Capacitor Preferences
+// plugin, which on iOS is backed by UserDefaults (readable from the native
+// Swift background-task code that can't see this WebView's localStorage at
+// all) and on plain web/PWA quietly falls back to a differently-prefixed
+// localStorage key of its own, same effect either way — harmless, mostly
+// inert there since nothing ever populates STORAGE_KEY_NATIVE_SYNCED
+// without the native task running.
+const STORAGE_KEY_NATIVE_QUEUE_MIRROR = "ct_native_offline_queue_v1"; // mirror of STORAGE_KEY_QUEUE, written every time the queue changes
+const STORAGE_KEY_NATIVE_SYNCED = "ct_native_synced_ids_v1"; // native background task writes [{_queue_id, stop_id, pdf_file_id}] here after a successful background send; reconcileNativeBackgroundSyncs_ reads + clears it
+const STORAGE_KEY_NATIVE_APPS_SCRIPT_URL = "ct_apps_script_url"; // APPS_SCRIPT_URL mirrored once at startup, since native Swift code can't read this file's own JS constant directly
+
 // ---------- app state ----------
 let manifest = null;
 let pins = null;
@@ -87,6 +100,12 @@ document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   registerServiceWorker_();
+  // No-op on plain web/PWA — see the two functions' own comments (NATIVE
+  // BACKGROUND SYNC section). On the native iOS app, this is what lets the
+  // Swift background-sync task find the current backend URL and pick up
+  // anything it managed to send while the app was fully closed.
+  mirrorAppsScriptUrlToNative_();
+  reconcileNativeBackgroundSyncs_();
 
   wireLoginScreen();
   wireRouteScreen();
@@ -204,7 +223,13 @@ async function init() {
   // Safari) online/offline detection at all.
   setInterval(() => { if (readQueue_().length > 0) flushOfflineQueue_(); }, 30000);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && readQueue_().length > 0) flushOfflineQueue_();
+    if (document.visibilityState !== "visible") return;
+    // Same "coming back into view is the natural moment to check" reasoning
+    // as flushOfflineQueue_ below — also the natural moment to pick up
+    // anything the native background-sync task sent while this page wasn't
+    // running at all (see reconcileNativeBackgroundSyncs_'s own comment).
+    reconcileNativeBackgroundSyncs_();
+    if (readQueue_().length > 0) flushOfflineQueue_();
   });
   // also try once on load in case there's a leftover queue from a prior offline session
   flushOfflineQueue_();
@@ -455,6 +480,22 @@ function openRouteScreen_() {
 // screen opens, and again from startRoute_/endRoute_ right after each logs
 // its event — no screen navigation involved either time now that briefing
 // and the stop list are the same screen.
+//
+// True only for the FIRST day of a multi-day "overnight" route — per G's
+// "back at cascade [button] except its first day of overnight truck":
+// on that one day the driver genuinely isn't heading back to the nursery
+// once the day's stops are done, so the tappable end-of-route button keeps
+// the generic "End Route" label instead of "Back at Cascade". Every other
+// case (a normal same-day route, or a LATER day of a multi-day route)
+// shows "Back at Cascade". Detected off driver_name's existing free-text
+// convention from ERP-outFuture (e.g. "Kent-Overnight(1)") — there's no
+// separate structured overnight/day field, this is the only signal there
+// is, and G confirmed "(1)" is what marks day one specifically (later
+// days — "(2)", "(3)", etc. — are NOT treated as first-day).
+function isFirstOvernightDay_(driverName) {
+  return !!driverName && driverName.indexOf("Overnight(1)") !== -1;
+}
+
 function updateRouteStatusBox_() {
   const driverName = truckDriverNames_[currentTruck] || currentTruck;
   document.getElementById("route-greeting").textContent = greetingForPacificTime_() + ", " + driverName + "!";
@@ -481,7 +522,7 @@ function updateRouteStatusBox_() {
       " · ended at " + formatClockPacific_(routeEndedAtLocal_) + ".";
     timingStatus.classList.remove("hidden");
   } else if (routeStarted_) {
-    btn.textContent = "End Route";
+    btn.textContent = isFirstOvernightDay_(driverName) ? "End Route" : "Back at Cascade";
     btn.classList.add("end-route-state");
     timingStatus.textContent = "Route started at " + formatClockPacific_(routeStartedAtLocal_) + ".";
     timingStatus.classList.remove("hidden");
@@ -2281,6 +2322,7 @@ function writeQueue_(queue) {
   } catch (err) {
     console.warn("could not persist offline queue", err);
   }
+  mirrorQueueToNative_(queue);
 }
 
 async function flushOfflineQueue_() {
@@ -2346,6 +2388,112 @@ function updateQueueBanner_() {
     banner.classList.remove("hidden");
     banner.textContent = count + " delivery" + (count === 1 ? "" : "ies") + " waiting to sync — will send automatically when back online.";
   }
+}
+
+// ==================================================================
+// NATIVE BACKGROUND SYNC (iOS app only)
+// ==================================================================
+// The offline queue above only ever flushes while THIS PAGE is open and
+// running — a submit, the "online" event, the 30s interval, or
+// visibilitychange. That's a hard ceiling on the plain web/PWA build: iOS
+// Safari gives a web page no way to run JS while the app is fully closed,
+// not backgrounded. The native iOS app (capacitor-app/) closes that gap
+// with real native code instead — a Swift BGTaskScheduler background task
+// (see capacitor-app/ios/App/App/AppDelegate.swift) that iOS runs
+// opportunistically while the app isn't even open. That native code can't
+// see this page's localStorage at all, so the three functions below are
+// the JS-side half of the bridge, via the Capacitor Preferences plugin
+// (iOS: backed by UserDefaults, readable from native Swift; plain web/PWA:
+// falls back to a differently-prefixed localStorage key — harmless, and
+// never actually populated with anything there since no native task ever
+// runs to write to it).
+//
+//   mirrorQueueToNative_        — every queue write (writeQueue_) is also
+//                                  mirrored here, so the native task always
+//                                  sees what's currently pending.
+//   mirrorAppsScriptUrlToNative_ — written once at startup, so the native
+//                                  task POSTs to whatever backend URL is
+//                                  actually configured in THIS file, not a
+//                                  separately hardcoded Swift copy that
+//                                  could silently drift out of sync.
+//   reconcileNativeBackgroundSyncs_ — the other direction: after the native
+//                                  task sends a queued item, it can't
+//                                  update THIS page's in-memory/localStorage
+//                                  state either (the page may not even be
+//                                  loaded while it runs) — so it records
+//                                  what it sent to STORAGE_KEY_NATIVE_SYNCED
+//                                  instead, and this function folds that
+//                                  into local state (removes the item from
+//                                  the queue, merges pdf_file_id the same
+//                                  way flushOfflineQueue_'s own success path
+//                                  does) the next time the app is actually
+//                                  open to run it — called once at startup
+//                                  and again on every visibilitychange back
+//                                  to visible (see init()/wireLoginScreen's
+//                                  caller above), so a driver reopening the
+//                                  app sees an up-to-date queue/route list
+//                                  whether a stop synced while they were
+//                                  looking at the app or while it was
+//                                  closed in their pocket.
+function nativePreferences_() {
+  return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences) || null;
+}
+
+function mirrorQueueToNative_(queue) {
+  const prefs = nativePreferences_();
+  if (!prefs) return;
+  prefs.set({ key: STORAGE_KEY_NATIVE_QUEUE_MIRROR, value: JSON.stringify(queue) }).catch((err) => {
+    console.warn("could not mirror offline queue to native storage", err);
+  });
+}
+
+function mirrorAppsScriptUrlToNative_() {
+  const prefs = nativePreferences_();
+  if (!prefs) return;
+  prefs.set({ key: STORAGE_KEY_NATIVE_APPS_SCRIPT_URL, value: APPS_SCRIPT_URL }).catch((err) => {
+    console.warn("could not mirror APPS_SCRIPT_URL to native storage", err);
+  });
+}
+
+async function reconcileNativeBackgroundSyncs_() {
+  const prefs = nativePreferences_();
+  if (!prefs) return; // plain web/PWA build — nothing to reconcile, ever
+
+  let entries;
+  try {
+    const res = await prefs.get({ key: STORAGE_KEY_NATIVE_SYNCED });
+    entries = JSON.parse(res.value || "[]");
+  } catch (err) {
+    return;
+  }
+  if (!Array.isArray(entries) || entries.length === 0) return;
+
+  // Clear the native record FIRST, before touching any local state. If
+  // this page reloads mid-reconcile, the worst case is one queue item's
+  // local status is a beat late (corrected by the next flush/reload) —
+  // safer than risking this list getting processed twice, which for a
+  // submit_stop payload would mean risking a second email to a real
+  // customer (see the sendDeliveryEmail_ rule in PROJECT-NOTES.md).
+  try {
+    await prefs.set({ key: STORAGE_KEY_NATIVE_SYNCED, value: "[]" });
+  } catch (err) {
+    return;
+  }
+
+  const sentIds = new Set(entries.map((e) => e._queue_id));
+  const current = readQueue_();
+  writeQueue_(current.filter((p) => !sentIds.has(p._queue_id)));
+
+  let anyPdfSynced = false;
+  entries.forEach((e) => {
+    if (e.stop_id && e.pdf_file_id) {
+      mergeDriverStateLocal_(e.stop_id, { pdf_file_id: e.pdf_file_id });
+      anyPdfSynced = true;
+    }
+  });
+  if (anyPdfSynced) applyStoredDriverState_();
+  updateQueueBanner_();
+  showToast(entries.length + " queued item(s) synced while the app was closed.");
 }
 
 // ==================================================================

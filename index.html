@@ -11,7 +11,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-09-27m">
+<link rel="stylesheet" href="style.css?v=2026-09-28a">
 </head>
 <body>
 
@@ -90,7 +90,9 @@
     <!-- Order note + delivery instructions, per G's "show order note at top -
          not just delivery note" — set once per stop in openStopScreen_
          (static per-stop info, unlike stop-warnings below which re-renders
-         as the driver edits racks). Phone number pending — see PROJECT-NOTES.md. -->
+         as the driver edits racks). Phone (tap-to-call) renders first, when
+         stop.phone is set — sourced from the "Customer Emails" tab's phone
+         column, see PROJECT-NOTES.md and openStopScreen_ in app.js. -->
     <div id="stop-notes"></div>
 
     <!-- "Print Delivery Note" used to also live here, but per G's "this should
@@ -221,6 +223,16 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=2026-09-27m"></script>
+<!-- Capacitor's core JS bridge + the Preferences plugin — needed ONLY by
+     the native iOS app (see capacitor-app/), for the native background-sync
+     task to read/write state this page also has access to (see NATIVE
+     BACKGROUND SYNC in app.js). Harmless on the plain web/PWA build: with
+     no native side injecting anything first, capacitor.js just sets up an
+     inert "web" platform on its own, and the Preferences plugin quietly
+     falls back to a plain (differently-prefixed) localStorage key that
+     nothing here ever reads back on that build. Must load before app.js. -->
+<script src="capacitor.js?v=2026-09-28a"></script>
+<script src="capacitor-preferences-plugin.js?v=2026-09-28a"></script>
+<script src="app.js?v=2026-09-28a"></script>
 </body>
 </html>
