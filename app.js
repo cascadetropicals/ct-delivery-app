@@ -20,6 +20,15 @@
  *       purely internal, not worth the diff/regression risk of renaming everywhere for no
  *       user-visible benefit — see PROJECT-NOTES.md).
  *       pins.json (truck PINs) is still a plain static file — those essentially never change.
+ *       As of 2026-09-29, the initial fetch is no longer the only one for a given login —
+ *       see the LIVE ROUTE-PLAN REFRESH section below for a periodic background re-fetch that
+ *       keeps truck/time/rack/address data current through a shift as dispatch changes it in
+ *       ERP-outFuture, without needing a re-login. Line items stay whatever the last "Create
+ *       Route Plan..." run published (deliberately NOT re-fetched on this same timer — see
+ *       that section's comment for why). stopKey_ (customer_code), not stop_id, is now the
+ *       stable per-stop identity everywhere LOCAL DRIVER-STATE PERSISTENCE cares about one,
+ *       since stop_id itself can change on a live refresh (a truck/time reassignment) — see
+ *       stopKey_'s own comment.
  *
  * Offline-first: two separate layers, both needed.
  *   1. service-worker.js caches the app SHELL (this file, style.css, index.html,
@@ -80,7 +89,7 @@ let flaggedItems = {};      // idx -> {item_code, item_name, size, qty, reason, 
 let countedItems = {};      // idx -> true, when Count Items mode has this row checked off (see renderItemPickList_)
 let countModeActive = false; // whether the Count Items per-row checkboxes are currently shown
 let itemSearchText_ = "";   // current text in the item search box (see #item-search-input)
-let activeSizeFilters_ = {}; // {"2 in": true, ...} — sizes currently toggled on as quick filters, OR'd together
+let activeSizeFilters_ = {}; // {"2in": true, ...} — sizes (plus the OTHER_SIZE_FILTER_KEY_ sentinel for "Everything Else") currently toggled on as quick filters, OR'd together
 // "Add Item" state — per G's "add the option to add items on the view."
 // See the ADD ITEM section further down for the functions that read/write
 // these. addedItems is keyed by a locally-assigned id (these items have no
@@ -90,6 +99,7 @@ let addedItems = {};
 let addedItemIdCounter_ = 0;
 let addItemPanelOpen_ = false;   // whether #add-item-panel is currently shown — preserved on a same-stop back-and-forth, like countModeActive
 let addItemSearchText_ = "";     // current text in #add-item-search-input
+let activeAddItemSizeFilters_ = {}; // same shape/OR'd-together pattern as activeSizeFilters_, but for the add-item catalog search (renderAddItemSizeFilterButtons_/renderAddItemResults_) — a separate object since it filters the whole catalog, not one stop's line items
 let itemsCatalog_ = null;        // the full ERP items catalog, once fetched — see loadItemsCatalog_. Deliberately module-level (not per-stop): once loaded it's reused for every stop the rest of the shift, not re-fetched each time this panel is opened.
 let itemsCatalogLoadPromise_ = null; // the in-flight fetch, if any — so opening the panel twice quickly doesn't fire two requests
 let sigPad = { ctx: null, drawing: false, hasStroke: false };
@@ -222,14 +232,21 @@ async function init() {
   // doesn't depend on the browser's own (notoriously unreliable on iOS
   // Safari) online/offline detection at all.
   setInterval(() => { if (readQueue_().length > 0) flushOfflineQueue_(); }, 30000);
+  // LIVE ROUTE-PLAN REFRESH — see that section's own comment for the full
+  // design. Same periodic-timer + visibilitychange pattern as the offline
+  // queue flush right above (the incoming-data mirror of that outgoing one).
+  setInterval(() => refreshRoutePlanLive_(), ROUTE_PLAN_LIVE_REFRESH_INTERVAL_MS);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
     // Same "coming back into view is the natural moment to check" reasoning
     // as flushOfflineQueue_ below — also the natural moment to pick up
     // anything the native background-sync task sent while this page wasn't
-    // running at all (see reconcileNativeBackgroundSyncs_'s own comment).
+    // running at all (see reconcileNativeBackgroundSyncs_'s own comment),
+    // and to pick up any truck/time/rack change dispatch made while this
+    // page wasn't open rather than waiting for the next timer tick.
     reconcileNativeBackgroundSyncs_();
     if (readQueue_().length > 0) flushOfflineQueue_();
+    refreshRoutePlanLive_();
   });
   // also try once on load in case there's a leftover queue from a prior offline session
   flushOfflineQueue_();
@@ -691,7 +708,8 @@ function renderRouteList_() {
     name.textContent = stop.customer_name;
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = stopMetaLine_(stop);
+    meta.appendChild(document.createTextNode(stopMetaLine_(stop) + " · "));
+    appendAddressWithBoldCity_(meta, stop.address || "");
     left.appendChild(time);
     left.appendChild(name);
     left.appendChild(meta);
@@ -708,11 +726,53 @@ function renderRouteList_() {
   });
 }
 
+// Racks before orders, per G's "have it say x racks, x orders (just show
+// racks before orders)" — was "X orders · X racks expected" (orders first,
+// with "expected"); now "X racks, X orders" (racks first, no "expected").
 function stopMetaLine_(stop) {
   const orderCount = stop.orders ? stop.orders.length : 0;
   const orderWord = orderCount === 1 ? "order" : "orders";
-  const racks = stop.racks_expected != null ? stop.racks_expected + " rack" + (stop.racks_expected === 1 ? "" : "s") : "?";
-  return orderCount + " " + orderWord + " · " + racks + " expected · " + (stop.address || "");
+  const racksVal = stop.racks_expected != null ? stop.racks_expected : "?";
+  const rackWord = stop.racks_expected === 1 ? "rack" : "racks";
+  return racksVal + " " + rackWord + ", " + orderCount + " " + orderWord;
+}
+
+// Google's universal maps link (google.com/maps/search) — not a
+// platform-specific geo: or maps: URI — per G's "check if it would work well
+// on an android tablet because i think the drivers are actually using
+// android not ipad - just make it look good and work well on both." This
+// same https:// URL works as a tap target on both platforms: Android and iOS
+// both intercept it and hand off to whichever maps app is installed (Google
+// Maps on Android, Google Maps or Apple Maps on iOS), falling back to a
+// plain browser tab with Google Maps if no app claims it — no user-agent
+// sniffing or platform branch needed.
+function mapsUrlForAddress_(address) {
+  return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(address);
+}
+
+// Splits an ERP-sourced "street, city, state, zip"-shaped address string and
+// appends it to `container` as DOM nodes with the city (the 2nd comma-
+// separated segment) wrapped in <b>, per G's "mark the city on the stop
+// cards bold". Built with createTextNode/a real <b> element, never
+// innerHTML — this is ERP-sourced text, never trusted as markup (same rule
+// renderStopLiveLabels_ follows for the stop-detail screen's notes). Falls
+// back to plain text if the address doesn't have at least a
+// "street, city" shape to split on, so a short/malformed address never
+// throws, it just isn't bolded.
+function appendAddressWithBoldCity_(container, address) {
+  const parts = address.split(",");
+  if (parts.length < 2) {
+    container.appendChild(document.createTextNode(address));
+    return;
+  }
+  const before = parts[0] + ", ";
+  const city = parts[1].trim();
+  const after = parts.length > 2 ? "," + parts.slice(2).join(",") : "";
+  container.appendChild(document.createTextNode(before));
+  const cityEl = document.createElement("b");
+  cityEl.textContent = city;
+  container.appendChild(cityEl);
+  container.appendChild(document.createTextNode(after));
 }
 
 function statusToClass_(status) {
@@ -762,8 +822,21 @@ function wireStopScreen() {
   // Search box — filters the item list by name as the driver types. Just
   // re-renders the list on every keystroke; the list is short enough per
   // stop that this doesn't need debouncing.
-  document.getElementById("item-search-input").addEventListener("input", (e) => {
+  const itemSearchInput_ = document.getElementById("item-search-input");
+  const itemSearchClearBtn_ = document.getElementById("item-search-clear-btn");
+  itemSearchInput_.addEventListener("input", (e) => {
     itemSearchText_ = e.target.value;
+    syncSearchClearBtn_(itemSearchInput_, itemSearchClearBtn_);
+    if (currentStop) renderItemPickList_(currentStop);
+  });
+  // Clear ("x") button — per G's "Add x to search bars... button i can click
+  // to clear search bar." Refocuses the box afterward so a driver can start
+  // typing a new search immediately instead of having to tap back into it.
+  itemSearchClearBtn_.addEventListener("click", () => {
+    itemSearchText_ = "";
+    itemSearchInput_.value = "";
+    syncSearchClearBtn_(itemSearchInput_, itemSearchClearBtn_);
+    itemSearchInput_.focus();
     if (currentStop) renderItemPickList_(currentStop);
   });
 
@@ -791,11 +864,25 @@ function wireStopScreen() {
     addItemPanelOpen_ = !addItemPanelOpen_;
     syncAddItemPanel_();
     if (addItemPanelOpen_ && !itemsCatalog_) {
-      loadItemsCatalog_().then(() => { if (addItemPanelOpen_) renderAddItemResults_(); });
+      loadItemsCatalog_().then(() => {
+        renderAddItemSizeFilterButtons_();
+        if (addItemPanelOpen_) renderAddItemResults_();
+      });
     }
   });
-  document.getElementById("add-item-search-input").addEventListener("input", (e) => {
+  const addItemSearchInput_ = document.getElementById("add-item-search-input");
+  const addItemSearchClearBtn_ = document.getElementById("add-item-search-clear-btn");
+  addItemSearchInput_.addEventListener("input", (e) => {
     addItemSearchText_ = e.target.value;
+    syncSearchClearBtn_(addItemSearchInput_, addItemSearchClearBtn_);
+    renderAddItemResults_();
+  });
+  // Same clear ("x") button pattern as the item-search box above.
+  addItemSearchClearBtn_.addEventListener("click", () => {
+    addItemSearchText_ = "";
+    addItemSearchInput_.value = "";
+    syncSearchClearBtn_(addItemSearchInput_, addItemSearchClearBtn_);
+    addItemSearchInput_.focus();
     renderAddItemResults_();
   });
 
@@ -821,61 +908,216 @@ function wireStopScreen() {
   // in-place on this same page via renderItemPickList_/buildExceptionInlineForm_.
   document.getElementById("to-signature-btn").addEventListener("click", () => {
     if (!currentStop) return;
+    // Per G's "i have to choose the reason why rejected" — a Rejected line
+    // with no sub-reason picked now blocks moving on, instead of silently
+    // letting it through with a blank optional field. Expand + scroll to the
+    // first offending line rather than just a toast, so the driver lands
+    // right on the buttons they need to tap, not left to go hunting for it.
+    const missingIdx = findMissingRejectReason_();
+    if (missingIdx != null) {
+      if (flaggedItems[missingIdx]) flaggedItems[missingIdx].expanded = true;
+      renderItemPickList_(currentStop);
+      const rowEl = document.querySelector('.item-pick-row[data-idx="' + missingIdx + '"]');
+      if (rowEl) rowEl.scrollIntoView({ behavior: "smooth", block: "center" });
+      showToast("Pick why this item was rejected before continuing.");
+      return;
+    }
     currentStop._racksUnloadedEntered = Number(document.getElementById("racks-unloaded-input").value);
     openSignatureScreen_(currentStop);
   });
 
-  // "Print Delivery Note" no longer has a button on this screen — see
+  // "Print Invoice" no longer has a button on this screen — see
   // wireSignatureScreen's print-pdf-btn-signature for the one and only
   // instance now, per G's "this should be option on the next site."
 }
 
-function openStopScreen_(stop) {
-  // Only clear flagged exceptions when this is actually a different stop
-  // (opened fresh from the route list) — not when the driver taps "Back"
-  // from the exceptions screen to re-check racks/items on the *same* stop.
-  // Resetting unconditionally here used to silently drop already-flagged
-  // items on that back-and-forth (see PROJECT-NOTES.md).
-  const isNewStop = !currentStop || currentStop.stop_id !== stop.stop_id;
-  currentStop = stop;
-  if (isNewStop) {
-    flaggedItems = {};
-    // Same reasoning applies to the count-off checkboxes, search text, size
-    // filters, signature, and rack photo: clear them when starting a
-    // genuinely new stop, but leave them alone on a same-stop back-and-forth
-    // (e.g. sign -> back to exceptions -> forward to signature again
-    // shouldn't wipe a signature already captured, or a driver's half-done
-    // item count).
-    countedItems = {};
-    countModeActive = false;
-    itemSearchText_ = "";
-    activeSizeFilters_ = {};
-    // Same reasoning again: a genuinely new stop starts with no added items
-    // and the search panel closed, but reopening the SAME stop (e.g. sign ->
-    // back -> forward) must not silently drop an item the driver already
-    // added. itemsCatalog_ itself is untouched here on purpose — it's not
-    // per-stop state, see its declaration comment.
-    addedItems = {};
-    addItemPanelOpen_ = false;
-    addItemSearchText_ = "";
-    clearSignaturePad_();
-    clearRackPhoto_();
-    clearSkipReason_();
+// ==================================================================
+// LIVE ROUTE-PLAN REFRESH (2026-09-29) — per G's "Times / truck order /
+// rack number could be changed - should be displayed on the app... make it
+// somehow so that when changes made here it updates in the app - for
+// example delivery times get changed after prep already done etc - changes
+// should still arrive - item data still ok to get from the erp and it
+// doesnt change after thats ok but the truck and delivery data should be
+// based on the live erp export." Code.gs now re-reads ERP-outFuture LIVE on
+// every ?action=get_route_plan/get_trucks fetch instead of just serving
+// whatever "Create Route Plan..." last published (see buildLiveRouteStops_
+// in Code.gs for the backend half and exactly which fields are live vs
+// static) — this is the frontend half: a periodic background re-fetch that
+// merges the fresh truck/time/rack/address/$-total fields onto the stops
+// already in memory, WITHOUT resetting anything the driver is mid-way
+// through (flaggedItems, countedItems, addedItems, a typed racks count, a
+// drawn signature, search/filter state) and WITHOUT losing an
+// already-submitted stop's local driver_state even if it's momentarily
+// missing from a later live fetch (see refreshRoutePlanLive_'s own merge-
+// policy comment below).
+// ==================================================================
+const ROUTE_PLAN_LIVE_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 min — ERP-outFuture itself only refreshes every 30 min, 6am-3pm (see its own title-row banner / the ROUTE PLAN section comment in Code.gs), so this is already well ahead of that; going faster buys nothing
+
+// The stable identity a stop keeps across a live refresh, even though
+// stop_id ("T4-1"-style) is recomputed from the CURRENT truck+delivery-time
+// sort and can change the moment either one does. customer_code doesn't —
+// ERP-outFuture groups a whole day's orders for one customer into a single
+// stop the same way regardless of which truck/time ends up on it (see
+// readErpOutfutureStops_ in Code.gs). stop_id is still sent to the backend
+// (Sheet rows, filenames, the printed invoice's own confirmation number)
+// and still shown to the driver as a label — it's just no longer trusted as
+// a stable identity for anything stored on THIS device. Falls back to
+// stop_id itself for the rare stop with no customer_code.
+function stopKey_(stop) {
+  return (stop && (stop.customer_code || stop.stop_id)) || "";
+}
+
+// Per-stop fields that come straight off ERP-outFuture and can legitimately
+// change between refreshes — see buildLiveRouteStops_'s own doc comment in
+// Code.gs for the exact static/live split this mirrors. Deliberately
+// excludes line_items_combined/cart_number/payment_terms/contact_emails/
+// phone (static — G confirmed item data doesn't need to be live) and
+// driver_state (local-only — see LOCAL DRIVER-STATE PERSISTENCE below;
+// never comes from the server in any way that matters here).
+const LIVE_STOP_FIELDS_ = [
+  "stop_id", "truck", "delivery_time", "customer_name", "address", "ship_state",
+  "delivery_instructions", "order_note", "racks_expected", "orders",
+  "true_subtotal", "delivery_fee", "true_total",
+];
+
+// Fetches the route plan fresh and merges only the LIVE fields (see
+// LIVE_STOP_FIELDS_) onto whatever's already in manifest.stops, matched by
+// stopKey_ — mutating the existing stop objects IN PLACE rather than
+// replacing them, so currentStop (if the driver has a stop screen open)
+// picks up the change automatically through its existing reference, no
+// separate lookup needed.
+//
+// Merge policy: a stop the fresh fetch returns is either matched onto an
+// existing one (live fields patched in place) or, if genuinely new to this
+// device, appended. A stop this device already knows about that's MISSING
+// from the fresh fetch is kept, unmodified, rather than removed — dropping
+// a stop the driver may have already delivered (or is mid-way through) just
+// because one live read didn't include it (a dispatch edit mid-save, a
+// transient ERP-outFuture hiccup) is a worse failure than occasionally
+// showing one stop a beat stale. A stop genuinely reassigned to a different
+// truck doesn't need special handling either — its own `truck` field just
+// updates to the new one, and renderRouteList_'s existing per-truck filter
+// naturally stops showing it on this driver's list.
+//
+// Called on a timer (see init()) and whenever the app comes back into view
+// (visibilitychange) — same "coming back into view is the natural moment to
+// check" reasoning flushOfflineQueue_/reconcileNativeBackgroundSyncs_
+// already use for the outgoing side of this same idea.
+async function refreshRoutePlanLive_() {
+  if (!manifest) return; // nothing loaded yet (still mid-login) — nothing to refresh
+  let json;
+  try {
+    const res = await fetch(APPS_SCRIPT_URL + "?action=get_route_plan", { cache: "no-store" });
+    json = await res.json();
+  } catch (err) {
+    console.warn("live route-plan refresh failed (network) — keeping what's already loaded", err);
+    return;
+  }
+  if (!json || json.ok === false || !Array.isArray(json.stops)) {
+    console.warn("live route-plan refresh returned an error/unexpected shape — keeping what's already loaded", json);
+    return;
   }
 
+  const existingByKey = new Map(manifest.stops.map((s) => [stopKey_(s), s]));
+  const freshKeys = new Set();
+  const merged = json.stops.map((fresh) => {
+    const key = stopKey_(fresh);
+    freshKeys.add(key);
+    const existing = existingByKey.get(key);
+    if (existing) {
+      LIVE_STOP_FIELDS_.forEach((field) => { existing[field] = fresh[field]; });
+      return existing;
+    }
+    return fresh; // brand-new stop, not previously known on this device
+  });
+  // Keep any previously-known stop the fresh fetch didn't return — see the
+  // merge-policy comment above.
+  manifest.stops.forEach((s) => { if (!freshKeys.has(stopKey_(s))) merged.push(s); });
+  manifest.stops = merged;
+  // A stop that was briefly missing from one live fetch and then reappears
+  // arrives above as a brand-new object (the "return fresh" branch, not the
+  // preserved-by-reference "existing" branch), so it has no driver_state on
+  // it yet. Re-apply anything already saved locally for it so it doesn't
+  // look reset/unsubmitted just because of a transient ERP-outFuture gap.
+  applyStoredDriverState_();
+
+  manifest.trucks = json.trucks || manifest.trucks;
+  manifest.truck_drivers = json.truck_drivers || manifest.truck_drivers;
+  manifest.truck_start_times = json.truck_start_times || manifest.truck_start_times;
+  truckDriverNames_ = manifest.truck_drivers;
+  truckStartTimes_ = manifest.truck_start_times;
+
+  saveRoutePlanCache_(manifest, pins);
+
+  // Re-render whatever's actually on screen so the change is visible right
+  // away, without disturbing anything the driver is mid-edit on —
+  // renderStopLiveLabels_ (below) deliberately touches only labels, never
+  // the racks-unloaded INPUT value or any flagged/counted/added state.
+  const routeScreenActive = document.getElementById("screen-route").classList.contains("active");
+  if (routeScreenActive) renderRouteList_();
+  const stopScreenActive = document.getElementById("screen-stop").classList.contains("active");
+  if (currentStop && stopScreenActive) {
+    renderStopLiveLabels_(currentStop);
+    renderStopWarnings_(currentStop);
+  }
+}
+
+// Sets the header/meta/notes/expected-racks-label text off `stop`'s CURRENT
+// fields — split out of openStopScreen_ (2026-09-29) so a live route-plan
+// refresh (see refreshRoutePlanLive_) can re-run just this part while the
+// driver has this exact stop open, without touching anything openStopScreen_
+// also resets on a genuinely new stop (flaggedItems, the racks-unloaded
+// INPUT value, search/filter state, the signature pad, ...). Deliberately
+// does NOT touch #racks-unloaded-input's value — only the "Expected: N
+// racks" LABEL next to it — so a rack-count change arriving mid-entry can
+// never overwrite what the driver already typed; see renderStopWarnings_
+// for how a resulting mismatch still gets flagged.
+function renderStopLiveLabels_(stop) {
   document.getElementById("stop-name").textContent = stop.customer_name;
 
   const orderNums = (stop.orders || []).map((o) => o.order_number).join(", ");
-  document.getElementById("stop-meta").textContent =
-    stop.address + " · Order" + ((stop.orders || []).length === 1 ? "" : "s") + " " + orderNums +
-    " · " + (stop.payment_terms || "");
+  // sales_person (2026-09-29, per G's "add sales person here at top based
+  // on customers export") — sourced from "ERP(Customers Export)"'s "Sales
+  // Person" column (see getCustomerContactMap_/getErpCustomerMap_ in
+  // Code.gs), a STATIC field like payment_terms right next to it (not
+  // re-looked-up on a live refresh — a customer's assigned rep doesn't
+  // change mid-shift). Appended only when present — frequently blank in
+  // the real ERP data (not every customer has an assigned rep), and
+  // unconditionally appending it here would leave a dangling "· " for
+  // those stops, same problem this line already has with payment_terms.
+  //
+  // The address is now a real tappable link that opens a map (2026-09-29,
+  // per G's "Make so map opens when clicking on address on stop") — same
+  // "make it a real tap target, not inert text" reasoning as the phone
+  // number link above in this function. Built with DOM nodes rather than
+  // one textContent string, same "ERP-sourced text is never trusted as
+  // markup" rule as everywhere else here — the address itself still goes
+  // in via textContent on the anchor, never innerHTML.
+  const metaEl = document.getElementById("stop-meta");
+  metaEl.innerHTML = "";
+  if (stop.address) {
+    const addrLink = document.createElement("a");
+    addrLink.className = "address-link";
+    addrLink.href = mapsUrlForAddress_(stop.address);
+    addrLink.target = "_blank";
+    addrLink.rel = "noopener";
+    addrLink.textContent = stop.address;
+    metaEl.appendChild(addrLink);
+  } else {
+    metaEl.appendChild(document.createTextNode(stop.address || ""));
+  }
+  metaEl.appendChild(document.createTextNode(
+    " · Order" + ((stop.orders || []).length === 1 ? "" : "s") + " " + orderNums +
+    " · " + (stop.payment_terms || "") +
+    (stop.sales_person ? " · Sales: " + stop.sales_person : "")
+  ));
 
   // Order note + delivery instructions at the top of the screen, per G's
-  // "show order note at top - not just delivery note" — static per-stop
-  // info, set once here rather than in renderStopWarnings_ (which re-runs
-  // on every racks-input keystroke and is for racks-mismatch warnings, a
-  // different, dynamic kind of thing). Built with textContent, not
-  // innerHTML — this is ERP-sourced text, never trusted as markup.
+  // "show order note at top - not just delivery note" — set here rather
+  // than in renderStopWarnings_ (which re-runs on every racks-input
+  // keystroke and is for racks-mismatch warnings, a different, dynamic kind
+  // of thing). Built with textContent, not innerHTML — this is ERP-sourced
+  // text, never trusted as markup.
   const notesBox = document.getElementById("stop-notes");
   notesBox.innerHTML = "";
   // Phone renders first — "at top" per G's ask — as a real tel: link so a
@@ -905,6 +1147,54 @@ function openStopScreen_(stop) {
   }
 
   document.getElementById("racks-expected-label").textContent = stop.racks_expected != null ? stop.racks_expected : "-";
+}
+
+function openStopScreen_(stop) {
+  // Only clear flagged exceptions when this is actually a different stop
+  // (opened fresh from the route list) — not when the driver taps "Back"
+  // from the exceptions screen to re-check racks/items on the *same* stop.
+  // Resetting unconditionally here used to silently drop already-flagged
+  // items on that back-and-forth (see PROJECT-NOTES.md). Compared by
+  // stopKey_ (customer_code), not stop_id — as of 2026-09-29 stop_id gets
+  // recomputed on every live route-plan refresh (see refreshRoutePlanLive_)
+  // whenever a stop's truck or delivery time changes, so comparing it here
+  // would wrongly treat "the same stop, just reassigned" as a brand-new
+  // stop and wipe out whatever the driver had already flagged/counted/added.
+  const isNewStop = !currentStop || stopKey_(currentStop) !== stopKey_(stop);
+  currentStop = stop;
+  if (isNewStop) {
+    flaggedItems = {};
+    // Same reasoning applies to the count-off checkboxes, search text, size
+    // filters, signature, and rack photo: clear them when starting a
+    // genuinely new stop, but leave them alone on a same-stop back-and-forth
+    // (e.g. sign -> back to exceptions -> forward to signature again
+    // shouldn't wipe a signature already captured, or a driver's half-done
+    // item count).
+    countedItems = {};
+    countModeActive = false;
+    itemSearchText_ = "";
+    activeSizeFilters_ = {};
+    // Same reasoning again: a genuinely new stop starts with no added items
+    // and the search panel closed, but reopening the SAME stop (e.g. sign ->
+    // back -> forward) must not silently drop an item the driver already
+    // added. itemsCatalog_ itself is untouched here on purpose — it's not
+    // per-stop state, see its declaration comment.
+    addedItems = {};
+    addItemPanelOpen_ = false;
+    addItemSearchText_ = "";
+    activeAddItemSizeFilters_ = {};
+    clearSignaturePad_();
+    clearRackPhoto_();
+    clearSkipReason_();
+  }
+
+  // Header/meta/notes/expected-racks-label — split into its own function
+  // (renderStopLiveLabels_, below) so a live route-plan refresh (see
+  // refreshRoutePlanLive_) can re-run just this part while the driver has
+  // this exact stop open, without re-running anything above that resets
+  // driver-entered state on a genuinely new stop.
+  renderStopLiveLabels_(stop);
+
   const racksInput = document.getElementById("racks-unloaded-input");
   // driver_state.racks_unloaded (post-submit truth) wins if it's there;
   // otherwise fall back to _racksUnloadedEntered (set when "Next: Signature"
@@ -994,12 +1284,23 @@ function addedItemsSubtotal_(items) {
   }, 0);
 }
 
+// Per G's "remove this text" (the old plain "Racks unloaded (X) doesn't
+// match expected (Y)" message, shown for ANY mismatch, over or under) —
+// that generic message is gone. In its place: only the over-count case gets
+// a warning now — under-counting is a completely normal, expected part of a
+// delivery (short/rejected/damaged lines all reduce racks unloaded below
+// expected, and that's exactly what the exception flow below already
+// covers) but unloading MORE racks than expected is the case actually worth
+// a driver double-checking before it's too late to easily fix (wrong truck's
+// racks, a miscount) — per G's "If more racks entered - make colored
+// message - say something like double check so you are not unloading too
+// many racks." Styled distinctly (.stop-warning-caution, amber) rather than
+// plain .hint text, so it reads as an actual caution, not routine copy.
 function renderStopWarnings_(stop) {
   stop = stop || currentStop;
   if (!stop) return;
   const box = document.getElementById("stop-warnings");
   box.innerHTML = "";
-  const warnings = [];
 
   // total_discrepancy_note / missing-line-items / email_gap_note are
   // internal office-side data-quality flags (surfaced to office in the
@@ -1011,16 +1312,12 @@ function renderStopWarnings_(stop) {
 
   const racksInput = document.getElementById("racks-unloaded-input");
   const entered = racksInput.value === "" ? null : Number(racksInput.value);
-  if (entered != null && stop.racks_expected != null && entered !== stop.racks_expected) {
-    warnings.push("Racks unloaded (" + entered + ") doesn't match expected (" + stop.racks_expected + "). Flag it as an exception below if that's correct.");
-  }
-
-  warnings.forEach((w) => {
+  if (entered != null && stop.racks_expected != null && entered > stop.racks_expected) {
     const p = document.createElement("p");
-    p.className = "hint";
-    p.textContent = w;
+    p.className = "stop-warning-caution";
+    p.textContent = "Double check — you're unloading more racks (" + entered + ") than expected (" + stop.racks_expected + "). Make sure you're not unloading too many.";
     box.appendChild(p);
-  });
+  }
 }
 
 // ==================================================================
@@ -1040,30 +1337,55 @@ function syncCountItemsBtn_() {
   btn.classList.toggle("selected", countModeActive);
 }
 
+// Shows/hides a search box's clear ("x") button based on whether it
+// currently has any text — shared by the item-search box and the add-item
+// catalog search box. Per G's "Add x to search bars - on right side in the
+// bar - basically button i can click to clear search bar."
+function syncSearchClearBtn_(inputEl, btnEl) {
+  btnEl.classList.toggle("hidden", inputEl.value === "");
+}
+
+// Fixed quick-filter sizes, in display order — see the doc comment below
+// for why this stays a short fixed list rather than one button per size.
+const QUICK_FILTER_SIZES_ = ["2in", "4in", "6in"];
+// Sentinel key in activeSizeFilters_ for the "Everything Else" button,
+// distinguishing it from a real size string so it can be excluded from the
+// "which explicit sizes are active" list wherever that's read.
+const OTHER_SIZE_FILTER_KEY_ = "__other__";
+
 // Called once per openStopScreen_ (not on every renderItemPickList_ render)
 // since a stop's set of sizes never changes mid-visit — only the buttons'
 // "selected" look does, and that's driven by activeSizeFilters_ directly.
 //
-// Only 2in/4in ever get a button — a fixed pair, not one per distinct size
-// this stop happens to carry. G's original ask named exactly these two
-// ("buttons to quick filter 2in, 4in"); the first pass instead built one
-// button per size actually present, which on a stop with a wide size mix
-// (10in/14in/2in/3in/4in/5in/6in/8in) produced a cluttered 8-button row
-// nobody asked for. Either button is simply skipped if this stop has no
-// line item of that size, rather than showing a filter that would always
-// empty the list.
+// Only 2in/4in/6in ever get their own button — a fixed trio, not one per
+// distinct size this stop happens to carry. G's original ask named exactly
+// two of these ("buttons to quick filter 2in, 4in"), later extended to
+// three plus a catch-all ("add 6in and everything else filter button"); an
+// earlier pass that tried one button per size actually present, on a stop
+// with a wide size mix (10in/14in/2in/3in/4in/5in/6in/8in), produced a
+// cluttered 8-button row nobody asked for. A 2in/4in/6in button is simply
+// skipped if this stop has no line item of that size, rather than showing
+// a filter that would always empty the list. "Everything Else" covers
+// every item that ISN'T 2in/4in/6in — including one with no size at all —
+// in one button instead of a button per odd size (3in, 5in, 8in, 10in,
+// 14in, ...); it only shows up if this stop actually has one of those.
 function renderSizeFilterButtons_(stop) {
   const row = document.getElementById("size-filter-row");
   row.innerHTML = "";
 
   const presentSizes = {};
+  let hasOtherSizes = false;
   getLineItems_(stop).forEach((item) => {
     const s = (item.size || "").trim();
-    if (s) presentSizes[s] = true;
+    if (s && QUICK_FILTER_SIZES_.indexOf(s) !== -1) {
+      presentSizes[s] = true;
+    } else {
+      hasOtherSizes = true;
+    }
   });
-  const sizes = ["2in", "4in"].filter((s) => presentSizes[s]);
+  const sizes = QUICK_FILTER_SIZES_.filter((s) => presentSizes[s]);
 
-  if (sizes.length === 0) {
+  if (sizes.length === 0 && !hasOtherSizes) {
     row.classList.add("hidden");
     return;
   }
@@ -1084,10 +1406,92 @@ function renderSizeFilterButtons_(stop) {
     });
     row.appendChild(btn);
   });
+
+  if (hasOtherSizes) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "size-filter-btn" + (activeSizeFilters_[OTHER_SIZE_FILTER_KEY_] ? " selected" : "");
+    btn.textContent = "Everything Else";
+    // Same OR-with-the-others toggle behavior as a real size button — see
+    // renderItemPickList_ for how this sentinel key is read back out.
+    btn.addEventListener("click", () => {
+      activeSizeFilters_[OTHER_SIZE_FILTER_KEY_] = !activeSizeFilters_[OTHER_SIZE_FILTER_KEY_];
+      btn.classList.toggle("selected", !!activeSizeFilters_[OTHER_SIZE_FILTER_KEY_]);
+      renderItemPickList_(stop);
+    });
+    row.appendChild(btn);
+  }
+}
+
+// Same 2in/4in/6in + Everything Else quick-filter pattern as
+// renderSizeFilterButtons_ above, but for the add-item catalog search — per
+// G's "To add item search have size filter button applied as well." Reads
+// sizes from itemsCatalog_ (the full ~9,000-row catalog) rather than one
+// stop's line items, filters activeAddItemSizeFilters_ (its own, separate
+// OR'd-together state — see that variable's declaration comment) instead of
+// activeSizeFilters_, and re-renders #add-item-results instead of the item
+// pick list. Called from syncAddItemPanel_ (every time the panel opens/
+// re-renders) and after the catalog first loads, so the buttons are correct
+// whether the catalog was already cached or not yet.
+function renderAddItemSizeFilterButtons_() {
+  const row = document.getElementById("add-item-size-filter-row");
+  if (!row) return;
+  row.innerHTML = "";
+
+  if (!itemsCatalog_ || itemsCatalog_.length === 0) {
+    row.classList.add("hidden");
+    return;
+  }
+
+  const presentSizes = {};
+  let hasOtherSizes = false;
+  itemsCatalog_.forEach((it) => {
+    const s = (it.size || "").trim();
+    if (s && QUICK_FILTER_SIZES_.indexOf(s) !== -1) {
+      presentSizes[s] = true;
+    } else {
+      hasOtherSizes = true;
+    }
+  });
+  const sizes = QUICK_FILTER_SIZES_.filter((s) => presentSizes[s]);
+
+  if (sizes.length === 0 && !hasOtherSizes) {
+    row.classList.add("hidden");
+    return;
+  }
+  row.classList.remove("hidden");
+
+  sizes.forEach((size) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "size-filter-btn" + (activeAddItemSizeFilters_[size] ? " selected" : "");
+    btn.textContent = size;
+    btn.addEventListener("click", () => {
+      activeAddItemSizeFilters_[size] = !activeAddItemSizeFilters_[size];
+      btn.classList.toggle("selected", !!activeAddItemSizeFilters_[size]);
+      renderAddItemResults_();
+    });
+    row.appendChild(btn);
+  });
+
+  if (hasOtherSizes) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "size-filter-btn" + (activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_] ? " selected" : "");
+    btn.textContent = "Everything Else";
+    btn.addEventListener("click", () => {
+      activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_] = !activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_];
+      btn.classList.toggle("selected", !!activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_]);
+      renderAddItemResults_();
+    });
+    row.appendChild(btn);
+  }
 }
 
 function renderItemToolbar_(stop) {
-  document.getElementById("item-search-input").value = itemSearchText_;
+  const itemSearchInput = document.getElementById("item-search-input");
+  itemSearchInput.value = itemSearchText_;
+  syncSearchClearBtn_(itemSearchInput, document.getElementById("item-search-clear-btn"));
   syncCountItemsBtn_();
   renderSizeFilterButtons_(stop);
   syncAddItemPanel_();
@@ -1117,7 +1521,10 @@ function renderItemToolbar_(stop) {
 function syncAddItemPanel_() {
   document.getElementById("add-item-panel").classList.toggle("hidden", !addItemPanelOpen_);
   document.getElementById("add-item-toggle-btn").classList.toggle("selected", addItemPanelOpen_);
-  document.getElementById("add-item-search-input").value = addItemSearchText_;
+  const addItemSearchInput = document.getElementById("add-item-search-input");
+  addItemSearchInput.value = addItemSearchText_;
+  syncSearchClearBtn_(addItemSearchInput, document.getElementById("add-item-search-clear-btn"));
+  renderAddItemSizeFilterButtons_();
   if (addItemPanelOpen_) renderAddItemResults_();
 }
 
@@ -1186,16 +1593,35 @@ function renderAddItemResults_() {
   }
 
   const q = addItemSearchText_.trim().toLowerCase();
-  if (!q) {
+  // Size filters (activeAddItemSizeFilters_, same OR'd-together pattern as
+  // the stop's own item list — see renderAddItemSizeFilterButtons_) can
+  // narrow the catalog on their own, without any typed text, same as they do
+  // on the item pick list. Only block on "type to search" when NEITHER a
+  // search term nor a size filter is active — otherwise a size-only browse
+  // (e.g. "just show me every 4in item") would be impossible.
+  const activeAddSizes = Object.keys(activeAddItemSizeFilters_).filter((s) => s !== OTHER_SIZE_FILTER_KEY_ && activeAddItemSizeFilters_[s]);
+  const addOtherActive = !!activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_];
+  const hasSizeFilter = activeAddSizes.length > 0 || addOtherActive;
+  if (!q && !hasSizeFilter) {
     box.innerHTML = '<p class="hint">Type to search the item catalog.</p>';
     return;
   }
 
-  const matches = itemsCatalog_.filter((it) => (
+  let matches = itemsCatalog_.filter((it) => (
+    !q ||
     (it.item_name || "").toLowerCase().indexOf(q) !== -1 ||
     (it.common_name || "").toLowerCase().indexOf(q) !== -1 ||
     (it.item_code || "").toLowerCase().indexOf(q) !== -1
-  )).slice(0, 40);
+  ));
+  if (hasSizeFilter) {
+    matches = matches.filter((it) => {
+      const size = (it.size || "").trim();
+      if (activeAddSizes.indexOf(size) !== -1) return true;
+      if (addOtherActive && QUICK_FILTER_SIZES_.indexOf(size) === -1) return true;
+      return false;
+    });
+  }
+  matches = matches.slice(0, 40);
 
   if (matches.length === 0) {
     box.innerHTML = '<p class="hint">No items match your search.</p>';
@@ -1230,12 +1656,14 @@ function renderAddItemResults_() {
 // a search result is the driver asking to set a qty right now, per G's "it
 // needs to show me immediately where i can choose qty."
 function addCatalogItem_(it) {
-  const existing = it.item_code ? Object.values(addedItems).find((a) => a.item_code === it.item_code) : null;
-  if (existing) {
-    existing.qty = (Number(existing.qty) || 0) + 1;
-    existing.expanded = true;
+  const existingEntry = it.item_code ? Object.entries(addedItems).find(([, a]) => a.item_code === it.item_code) : null;
+  let id;
+  if (existingEntry) {
+    id = existingEntry[0];
+    existingEntry[1].qty = (Number(existingEntry[1].qty) || 0) + 1;
+    existingEntry[1].expanded = true;
   } else {
-    const id = "a" + (addedItemIdCounter_++);
+    id = "a" + (addedItemIdCounter_++);
     addedItems[id] = {
       item_code: it.item_code || "",
       item_name: it.item_name || "",
@@ -1249,6 +1677,23 @@ function addCatalogItem_(it) {
   }
   renderAddedItemsList_();
   showToast((it.item_name || "Item") + " added.");
+  // Per G's "this transition needs to be more smooth - otherwise it bops up
+  // somewhere at bottom of screen and i dont even know i actually added item
+  // and where to add qty etc" — the toast alone wasn't enough: the Added
+  // Items section can sit well below a long catalog-search results list, so
+  // the newly-expanded qty control landed off-screen with nothing drawing
+  // the eye to it. Now the app scrolls straight to that row and briefly
+  // flashes it (see .just-added-flash in style.css) so it's unmistakable
+  // both THAT an item was added and WHERE its qty control is.
+  scrollToAddedItemRow_(id);
+}
+
+function scrollToAddedItemRow_(id) {
+  const rowEl = document.querySelector('.added-item-row[data-id="' + id + '"]');
+  if (!rowEl) return;
+  rowEl.scrollIntoView({ behavior: "smooth", block: "center" });
+  rowEl.classList.add("just-added-flash");
+  setTimeout(() => rowEl.classList.remove("just-added-flash"), 1200);
 }
 
 // Shared by renderAddedItemsList_ (initial render) and buildAddedItemDetail_'s
@@ -1282,6 +1727,7 @@ function renderAddedItemsList_() {
   entries.forEach(([id, it]) => {
     const row = document.createElement("div");
     row.className = "added-item-row";
+    row.dataset.id = id; // looked up by scrollToAddedItemRow_ right after adding — see addCatalogItem_
 
     const main = document.createElement("button");
     main.type = "button";
@@ -1409,7 +1855,7 @@ const REJECT_DETAIL_OPTIONS = ["Damaged leafs", "Pests", "Too small"];
 
 // The one place a flagged item's reason gets turned into the string this
 // app actually displays/stores/submits everywhere (the collapsed/expanded
-// row status, the submit payload, the printed delivery note) — folds in
+// row status, the submit payload, the printed invoice) — folds in
 // reject_detail when there is one ("Rejected - Pests"), otherwise just the
 // bare top-level reason. ex.reason ITSELF is never this combined string —
 // keeping it exactly one of EXCEPTION_REASONS is what lets the reason pill's
@@ -1418,6 +1864,20 @@ const REJECT_DETAIL_OPTIONS = ["Damaged leafs", "Pests", "Too small"];
 function exceptionReasonText_(ex) {
   if (ex.reason === "Rejected" && ex.reject_detail) return "Rejected - " + ex.reject_detail;
   return ex.reason;
+}
+
+// Returns the flaggedItems key (idx) of the first Rejected line with no
+// reject_detail chosen yet, or null if every Rejected line has one — per
+// G's "i have to choose the reason why rejected," checked from the Next:
+// Signature button in wireStopScreen before letting the driver move on.
+// Only Rejected needs this — Missing/Shipping Damage have no sub-reason at
+// all (see REJECT_DETAIL_OPTIONS), so they're never in scope here.
+function findMissingRejectReason_() {
+  for (const idx in flaggedItems) {
+    const ex = flaggedItems[idx];
+    if (ex.reason === "Rejected" && !ex.reject_detail) return idx;
+  }
+  return null;
 }
 
 // Shared by renderItemPickList_ (initial render / on collapse-expand) and
@@ -1460,9 +1920,18 @@ function renderItemPickList_(stop) {
     visible = visible.filter(({ item }) => (item.item_name || "").toLowerCase().indexOf(q) !== -1);
   }
 
-  const activeSizes = Object.keys(activeSizeFilters_).filter((s) => activeSizeFilters_[s]);
-  if (activeSizes.length > 0) {
-    visible = visible.filter(({ item }) => activeSizes.indexOf((item.size || "").trim()) !== -1);
+  // Explicit size buttons (2in/4in/6in) OR'd with "Everything Else" (any
+  // size not in that trio, including no size at all) — see
+  // renderSizeFilterButtons_ for how these get toggled on.
+  const activeSizes = Object.keys(activeSizeFilters_).filter((s) => s !== OTHER_SIZE_FILTER_KEY_ && activeSizeFilters_[s]);
+  const otherActive = !!activeSizeFilters_[OTHER_SIZE_FILTER_KEY_];
+  if (activeSizes.length > 0 || otherActive) {
+    visible = visible.filter(({ item }) => {
+      const size = (item.size || "").trim();
+      if (activeSizes.indexOf(size) !== -1) return true;
+      if (otherActive && QUICK_FILTER_SIZES_.indexOf(size) === -1) return true;
+      return false;
+    });
   }
 
   // Count Items mode: a checked-off row sinks to the bottom (stable sort —
@@ -1483,6 +1952,7 @@ function renderItemPickList_(stop) {
     const counted = !!countedItems[idx];
     const row = document.createElement("div");
     row.className = "item-pick-row" + (flagged ? " flagged" : "") + (counted ? " counted" : "");
+    row.dataset.idx = idx; // looked up by findMissingRejectReason_'s caller to scroll a driver back to a Rejected line with no reason picked yet
 
     // Wraps the optional checkbox + the main tap target side by side — see
     // the .item-pick-top CSS comment for why this is its own inner wrapper
@@ -1592,26 +2062,39 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
   // handlers below can reference it directly — declaration order in this
   // function, not DOM insertion order (that's set by the appendChild calls
   // further down, reasonRow first).
+  //
+  // A row of direct pill buttons now, not a <select> — per G's "where i
+  // click item rejected make so the currently optional dropdown is popping
+  // up directly and i have to choose the reason why rejected." Same
+  // reasoning as the top-level reason-btn-row just below (see its own CSS
+  // comment: "no dropdown to open on a tablet, and the current pick is
+  // visible without tapping in") — this sub-reason picker just never got the
+  // same treatment when that one was built. No longer optional either: it
+  // used to say "(optional)" and could be left blank; now findMissingRejectReason_
+  // (called from the Next: Signature button in wireStopScreen) blocks moving
+  // on until a Rejected line has one of these picked.
   const rejectDetailRow = document.createElement("div");
   rejectDetailRow.className = "reject-detail-row" + (ex.reason === "Rejected" ? "" : " hidden");
-  const rejectDetailSelect = document.createElement("select");
-  rejectDetailSelect.className = "reject-detail-select";
-  const placeholderOpt = document.createElement("option");
-  placeholderOpt.value = "";
-  placeholderOpt.textContent = "Why rejected? (optional)";
-  rejectDetailSelect.appendChild(placeholderOpt);
+  const rejectDetailLabel = document.createElement("div");
+  rejectDetailLabel.className = "reject-detail-label";
+  rejectDetailLabel.textContent = "Why rejected?";
+  rejectDetailRow.appendChild(rejectDetailLabel);
+  const rejectDetailBtnRow = document.createElement("div");
+  rejectDetailBtnRow.className = "reject-detail-btn-row";
   REJECT_DETAIL_OPTIONS.forEach((opt) => {
-    const o = document.createElement("option");
-    o.value = opt;
-    o.textContent = opt;
-    if (ex.reject_detail === opt) o.selected = true;
-    rejectDetailSelect.appendChild(o);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "reject-detail-btn" + (ex.reject_detail === opt ? " selected" : "");
+    btn.textContent = opt;
+    btn.addEventListener("click", () => {
+      ex.reject_detail = opt;
+      rejectDetailBtnRow.querySelectorAll(".reject-detail-btn").forEach((b) => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      updateItemPickStatus_(statusEl, ex, true);
+    });
+    rejectDetailBtnRow.appendChild(btn);
   });
-  rejectDetailSelect.addEventListener("change", () => {
-    ex.reject_detail = rejectDetailSelect.value;
-    updateItemPickStatus_(statusEl, ex, true);
-  });
-  rejectDetailRow.appendChild(rejectDetailSelect);
+  rejectDetailRow.appendChild(rejectDetailBtnRow);
 
   const reasonRow = document.createElement("div");
   reasonRow.className = "reason-btn-row";
@@ -1632,7 +2115,7 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
         rejectDetailRow.classList.remove("hidden");
       } else {
         ex.reject_detail = "";
-        rejectDetailSelect.value = "";
+        rejectDetailBtnRow.querySelectorAll(".reject-detail-btn").forEach((b) => b.classList.remove("selected"));
         rejectDetailRow.classList.add("hidden");
       }
       updateItemPickStatus_(statusEl, ex, true);
@@ -1745,14 +2228,14 @@ function wireSignatureScreen() {
   document.getElementById("submit-btn").addEventListener("click", () => submitStop_(true));
   document.getElementById("skip-sig-btn").addEventListener("click", () => submitStop_(false));
 
-  // There is only ONE print button now — "Print Delivery Note" — and it
+  // There is only ONE print button now — "Print Invoice" — and it
   // always produces the exact same official PDF that gets emailed to the
   // customer on real submit, whether or not this stop has synced yet. Per
   // G: "it should always print the full edited pdf thats also sent by mail
-  // when submitted." See printDeliveryNote_ for the synced-vs-unsynced
+  // when submitted." See printInvoice_ for the synced-vs-unsynced
   // branch. The old separate on-device "Print Copy for Customer" receipt
   // button is gone.
-  document.getElementById("print-pdf-btn-signature").addEventListener("click", printDeliveryNote_);
+  document.getElementById("print-pdf-btn-signature").addEventListener("click", printInvoice_);
 }
 
 function openSignatureScreen_(stop) {
@@ -1761,9 +2244,9 @@ function openSignatureScreen_(stop) {
   document.getElementById("skip-sig-btn").disabled = false;
   document.getElementById("signature-stop-name").textContent = stop.customer_name;
 
-  // The "Print Delivery Note" row is always visible now — printDeliveryNote_
+  // The "Print Invoice" row is always visible now — printInvoice_
   // itself decides whether to open the already-synced PDF or generate an
-  // on-demand preview from what's currently entered (see printDeliveryNote_).
+  // on-demand preview from what's currently entered (see printInvoice_).
   showScreen_("screen-signature");
   // The canvas lives inside a ".screen" that is "display:none" until now, so
   // getBoundingClientRect() would return 0x0 (and toDataURL() an empty image)
@@ -1954,7 +2437,7 @@ async function submitStop_(wantsSignature) {
   document.getElementById("submit-btn").disabled = true;
   document.getElementById("skip-sig-btn").disabled = true;
 
-  // Same payload builder printDeliveryNote_'s preview uses (see
+  // Same payload builder printInvoice_'s preview uses (see
   // buildStopPdfPayload_'s own comment) — keeps the real submit and the
   // on-demand preview PDF permanently in lockstep instead of two
   // hand-maintained copies of this same business logic quietly drifting
@@ -1974,7 +2457,7 @@ async function submitStop_(wantsSignature) {
   // changes the route list's pill COLOR (done_clean/done_exceptions both
   // render green now — see PROJECT-NOTES.md), only the underlying record.
   const newStatus = (exceptions.length > 0 || hasAddedItems) ? "done_exceptions" : "done_clean";
-  saveDriverStateLocal_(currentStop.stop_id, {
+  saveDriverStateLocal_(stopKey_(currentStop), {
     racks_unloaded: racksUnloaded,
     exceptions: exceptions,
     added_items: addedItemsPayload,
@@ -2017,9 +2500,9 @@ async function submitStop_(wantsSignature) {
 }
 
 // ==================================================================
-// PRINT DELIVERY NOTE (one button, always the real backend PDF)
+// PRINT INVOICE (one button, always the real backend PDF)
 // ==================================================================
-// Used to be TWO print buttons on this screen — "Print Delivery Note"
+// Used to be TWO print buttons on this screen — "Print Invoice"
 // (the real backend-generated PDF, only shown once a stop had already
 // synced) and a separate "Print Copy for Customer" (a simpler receipt
 // built entirely on-device, always available, for printing before syncing
@@ -2037,7 +2520,7 @@ async function submitStop_(wantsSignature) {
 // how a failed/offline generation is surfaced (a toast, not a silent
 // no-op — see the toast-visibility fix elsewhere in this file for why
 // that toast is now guaranteed visible).
-async function printDeliveryNote_() {
+async function printInvoice_() {
   if (!currentStop) return;
 
   // Already synced from a previous submit — open the real saved PDF
@@ -2059,7 +2542,7 @@ async function printDeliveryNote_() {
   try {
     const blob = await fetchPdfBlob_(payload);
     if (!blob) {
-      showToast("Couldn't generate the delivery note — check your connection and try again.");
+      showToast("Couldn't generate the invoice — check your connection and try again.");
       return;
     }
     // Not revoking the object URL after opening — the new tab needs it to
@@ -2081,7 +2564,7 @@ async function printDeliveryNote_() {
 // Builds the exact payload shape Code.gs's buildDeliveryPdfBlob_ (via
 // either handleSubmitStop_ or handlePreviewPdf_) needs to render the
 // delivery-confirmation document — shared by submitStop_ (the real submit)
-// and printDeliveryNote_ (a pre-submit preview print) so the two can never
+// and printInvoice_ (a pre-submit preview print) so the two can never
 // quietly drift apart into two different-looking documents, which is
 // exactly the confusion G's "2 print buttons" complaint was about in the
 // first place. hasSignatureOverride lets submitStop_ keep its own
@@ -2350,7 +2833,10 @@ async function flushOfflineQueue_() {
       // only gets its PDF built once it actually reaches the backend, so
       // the print button only becomes available here, on sync.
       if (result.pdf_file_id) {
-        mergeDriverStateLocal_(payload.stop_id, { pdf_file_id: result.pdf_file_id });
+        // customer_code, not stop_id — see stopKey_'s comment. Falls back to
+        // stop_id for a payload queued before this existed / the rare stop
+        // with no customer_code, same as stopKey_ itself does.
+        mergeDriverStateLocal_(payload.customer_code || payload.stop_id, { pdf_file_id: result.pdf_file_id });
         anyPdfSynced = true;
       }
     }
@@ -2486,8 +2972,13 @@ async function reconcileNativeBackgroundSyncs_() {
 
   let anyPdfSynced = false;
   entries.forEach((e) => {
-    if (e.stop_id && e.pdf_file_id) {
-      mergeDriverStateLocal_(e.stop_id, { pdf_file_id: e.pdf_file_id });
+    // customer_code, not stop_id — see stopKey_'s comment. AppDelegate.swift
+    // echoes customer_code back from the queued payload alongside stop_id
+    // (see its own comment) so this stays keyed the same way the web-side
+    // queue flush above is.
+    const key = e.customer_code || e.stop_id;
+    if (key && e.pdf_file_id) {
+      mergeDriverStateLocal_(key, { pdf_file_id: e.pdf_file_id });
       anyPdfSynced = true;
     }
   });
@@ -2543,10 +3034,24 @@ function registerServiceWorker_() {
 // so completed-stop status has to survive a reload locally. The
 // Sheet stays the source of truth for the office; this is just what
 // paints the route-list pills on this device.)
+//
+// Keyed by stopKey_(stop) (customer_code, falling back to stop_id — see
+// that function's own comment), NOT stop_id directly, as of 2026-09-29 —
+// stop_id ("T4-1"-style) is recomputed on every live route-plan refresh
+// whenever a stop's truck or delivery time changes (see
+// refreshRoutePlanLive_/buildLiveRouteStops_), so keying this by stop_id
+// would risk a stop that already synced showing as "not yet submitted"
+// again after a live refresh — worst case, a second email to a real
+// customer on a second submit (see the sendDeliveryEmail_ rule in
+// PROJECT-NOTES.md). Callers pass a raw key string (usually
+// stopKey_(currentStop), or payload.customer_code || payload.stop_id for a
+// queued/native-synced payload that only carries plain fields, not a stop
+// object) rather than a stop object, so this file stays intentionally naive
+// about what the key actually is.
 // ==================================================================
-function saveDriverStateLocal_(stopId, state) {
+function saveDriverStateLocal_(key, state) {
   const all = readDriverStateStore_();
-  all[stopId] = state;
+  all[key] = state;
   try {
     localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all));
   } catch (err) {
@@ -2560,9 +3065,9 @@ function saveDriverStateLocal_(stopId, state) {
 // racks/exceptions/signature state was already saved (immediately on
 // submit for an online delivery, or later on offline-queue sync), and must
 // not clobber it.
-function mergeDriverStateLocal_(stopId, patch) {
+function mergeDriverStateLocal_(key, patch) {
   const all = readDriverStateStore_();
-  all[stopId] = Object.assign({}, all[stopId], patch);
+  all[key] = Object.assign({}, all[key], patch);
   try {
     localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all));
   } catch (err) {
@@ -2579,8 +3084,9 @@ function readDriverStateStore_() {
 function applyStoredDriverState_() {
   const stored = readDriverStateStore_();
   manifest.stops.forEach((stop) => {
-    if (stored[stop.stop_id]) {
-      stop.driver_state = Object.assign({}, stop.driver_state, stored[stop.stop_id]);
+    const key = stopKey_(stop);
+    if (stored[key]) {
+      stop.driver_state = Object.assign({}, stop.driver_state, stored[key]);
     }
   });
 }

@@ -5,13 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="CT Delivery">
+<!-- Android home-screen install support (2026-09-29, per G's "check if it
+     would work well on an android tablet because i think the drivers are
+     actually using android not ipad"). This app already had the two
+     apple-mobile-web-app-* meta tags above for iOS's "Add to Home Screen,"
+     but nothing Android's equivalent (Chrome) actually reads — Android
+     needs a real Web App Manifest file to install as a standalone app (no
+     URL bar) with a proper icon; without one it can still be pinned as a
+     browser shortcut, but opens inside Chrome's UI chrome and uses a
+     screenshot as its icon, not the app icon. theme-color also colors
+     Android Chrome's own status bar / recent-apps card to match the app,
+     which iOS ignores but costs nothing to include either way. See
+     manifest.webmanifest — icons generated from the same leaf mark
+     Code.gs's PDF header already uses (CT_LOGO_PNG_BASE64_), so both
+     platforms' home-screen icons now match the app's own branding instead
+     of a generic screenshot. -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#2f5233">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
 <title>CT Delivery App</title>
 <!-- ?v= on style.css/app.js is a manual cache-buster: GitHub Pages' CDN and
      the iPad's browser both cache these files, so a plain re-upload can take
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-09-28a">
+<link rel="stylesheet" href="style.css?v=2026-09-29h">
 </head>
 <body>
 
@@ -95,13 +114,13 @@
          column, see PROJECT-NOTES.md and openStopScreen_ in app.js. -->
     <div id="stop-notes"></div>
 
-    <!-- "Print Delivery Note" used to also live here, but per G's "this should
+    <!-- "Print Invoice" used to also live here, but per G's "this should
          be option on the next site - its only clicked after everything done
          before submitting delivery" it's ONLY on the Signature screen
          (print-pdf-row-signature there) — that's the point a driver is
          actually done and about to submit (or reopening an already-delivered
          stop to reprint), not this entry screen. See openSignatureScreen_/
-         printDeliveryNote_. -->
+         printInvoice_. -->
 
     <div class="section-title">Racks</div>
     <div class="racks-row">
@@ -127,7 +146,14 @@
          search box — per G's "some where small," neither is used often
          enough to earn a full-width button like the ones above. -->
     <div class="item-toolbar">
-      <input type="text" id="item-search-input" class="item-search-input" placeholder="Search items&hellip;">
+      <div class="search-input-wrap">
+        <input type="text" id="item-search-input" class="item-search-input" placeholder="Search items&hellip;">
+        <!-- Clear ("x") button, per G's "Add x to search bars - on right side
+             in the bar - basically button i can click to clear search bar."
+             Hidden whenever the box is already empty — see
+             syncSearchClearBtn_ in app.js. -->
+        <button type="button" class="search-clear-btn hidden" id="item-search-clear-btn" aria-label="Clear search">&times;</button>
+      </div>
       <div class="item-toolbar-row">
         <div class="size-filter-row hidden" id="size-filter-row"></div>
         <button type="button" class="small-btn" id="count-items-toggle-btn">Count Items</button>
@@ -142,7 +168,16 @@
          sets a quantity, and adds it. Hidden until the toggle button above
          is tapped; see wireAddItemPanel_/renderAddItemResults_. -->
     <div id="add-item-panel" class="add-item-panel hidden">
-      <input type="text" id="add-item-search-input" class="item-search-input" placeholder="Search the item catalog&hellip;">
+      <div class="search-input-wrap">
+        <input type="text" id="add-item-search-input" class="item-search-input" placeholder="Search the item catalog&hellip;">
+        <button type="button" class="search-clear-btn hidden" id="add-item-search-clear-btn" aria-label="Clear search">&times;</button>
+      </div>
+      <!-- Size quick-filters for the item catalog search, per G's "To add
+           item search have size filter button applied as well" — same
+           2in/4in/6in + Everything Else pattern as the stop's own item list
+           (renderSizeFilterButtons_), just against the full catalog instead
+           of one stop's line items. See renderAddItemSizeFilterButtons_. -->
+      <div class="size-filter-row hidden" id="add-item-size-filter-row"></div>
       <div id="add-item-results"></div>
     </div>
 
@@ -183,12 +218,12 @@
          stop screen. Always visible now — per G's "it should always print
          the full edited pdf thats also sent by mail when submitted," this
          always opens/generates the exact same official PDF regardless of
-         whether this stop has synced yet (see printDeliveryNote_ in
+         whether this stop has synced yet (see printInvoice_ in
          app.js — there used to be a second, separate on-device receipt
          button here too, but G asked for just the one). See
          openSignatureScreen_. -->
     <div class="print-pdf-row" id="print-pdf-row-signature">
-      <button class="secondary" id="print-pdf-btn-signature">Print Delivery Note</button>
+      <button class="secondary" id="print-pdf-btn-signature">Print Invoice</button>
     </div>
 
     <div class="section-title">Photo of Delivered Rack (optional)</div>
@@ -231,8 +266,8 @@
      inert "web" platform on its own, and the Preferences plugin quietly
      falls back to a plain (differently-prefixed) localStorage key that
      nothing here ever reads back on that build. Must load before app.js. -->
-<script src="capacitor.js?v=2026-09-28a"></script>
-<script src="capacitor-preferences-plugin.js?v=2026-09-28a"></script>
-<script src="app.js?v=2026-09-28a"></script>
+<script src="capacitor.js?v=2026-09-29h"></script>
+<script src="capacitor-preferences-plugin.js?v=2026-09-29h"></script>
+<script src="app.js?v=2026-09-29h"></script>
 </body>
 </html>

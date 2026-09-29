@@ -41,6 +41,18 @@ header.app-bar {
 header.app-bar .title-wrap { flex: 1; min-width: 0; }
 header.app-bar h1 { font-size: 20px; margin: 0; font-weight: 600; }
 header.app-bar .sub { font-size: 14px; opacity: 0.85; margin-top: 2px; }
+/* Address is a real tap target that opens a map (2026-09-29, per G's "Make
+   so map opens when clicking on address on stop") — full opacity/underline
+   so it reads as tappable against the rest of .sub's dimmed text, same
+   "action vs. inert text" distinction #stop-notes p.phone-note already
+   makes for the phone link. */
+header.app-bar .sub a.address-link {
+  color: #fff;
+  opacity: 1;
+  font-weight: 600;
+  text-decoration: underline;
+}
+header.app-bar .sub a.address-link:active { opacity: 0.7; }
 header.app-bar button.back {
   background: rgba(255, 255, 255, 0.16);
   border: none;
@@ -199,6 +211,19 @@ button.secondary {
   flex: 0 0 auto; width: clamp(70px, 14vw, 100px);
 }
 
+/* Racks-over-expected caution, per G's "If more racks entered - make
+   colored message - say something like double check so you are not
+   unloading too many racks." Only fires when unloaded > expected — see
+   renderStopWarnings_ — replacing the old plain-text mismatch message that
+   fired for either direction. Amber/caution, not the exceptions' red — this
+   is a "double check before it's too late" nudge, not a flagged problem in
+   itself (unloading extra IS still flaggable as an exception below, same as
+   before). */
+.stop-warning-caution {
+  background: #fff4d6; border: 2px solid #f4b400; border-radius: 10px;
+  color: #7a5b00; font-weight: 700; padding: 12px 16px; margin: 14px 0 0;
+}
+
 /* Search + size quick-filters + Count Items toggle, above the item list —
    see the HTML comment on .item-toolbar in index.html for why these exist.
    The search box stays a full, easy-to-tap field (used on every stop with a
@@ -210,6 +235,19 @@ button.secondary {
   width: 100%; box-sizing: border-box; padding: var(--btn-pad-v) var(--btn-pad-h);
   font-size: var(--btn-font); border: 2px solid #ccc; border-radius: 10px; background: #fff;
 }
+/* Wraps a search box + its clear ("x") button, shared by the item search and
+   the add-item catalog search — per G's "Add x to search bars - on right
+   side in the bar." Extra right-padding on the input itself keeps typed text
+   from running under the button. */
+.search-input-wrap { position: relative; }
+.search-input-wrap .item-search-input { padding-right: 46px; }
+.search-clear-btn {
+  position: absolute; top: 0; bottom: 0; right: 2px; width: 44px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; background: transparent; color: #888; font-size: 26px; line-height: 1; cursor: pointer;
+}
+.search-clear-btn:active { color: #2f5233; }
+.search-clear-btn.hidden { display: none; }
 .item-toolbar-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px;
 }
@@ -307,17 +345,27 @@ button.secondary {
 }
 .reason-btn.selected { background: #b3261e; color: #fff; }
 
-/* Rejected-only sub-reason dropdown — per G's "when i choose rejected have
-   dropdown with options: damaged leafs, pests, too small." Shown/hidden by
-   buildExceptionInlineForm_ depending on which reason pill is selected,
-   never a separate reason of its own. */
+/* Rejected-only sub-reason picker — per G's "when i choose rejected have
+   dropdown with options: damaged leafs, pests, too small," then later "make
+   so the currently optional dropdown is popping up directly and i have to
+   choose the reason why rejected." Shown/hidden by buildExceptionInlineForm_
+   depending on which reason pill is selected, never a separate reason of its
+   own. Direct pill buttons now, not a <select> — same reasoning as
+   .reason-btn-row just above: no dropdown to open on a tablet, and the
+   current pick is visible without tapping in. Smaller/lighter than the
+   top-level .reason-btn row (this is a sub-choice, not the main one), but
+   same underlying pattern. */
 .reject-detail-row { margin-top: 10px; }
 .reject-detail-row.hidden { display: none; }
-.reject-detail-select {
-  width: 100%; box-sizing: border-box; padding: var(--btn-pad-v) var(--btn-pad-h);
-  font-size: var(--btn-font); font-weight: 700; color: #7a3630;
-  border: 2px solid #b3261e; border-radius: 10px; background: #fff;
+.reject-detail-label { font-size: 13px; font-weight: 700; color: #7a3630; margin-bottom: 6px; }
+.reject-detail-btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.reject-detail-btn {
+  flex: 1 1 100px;
+  padding: clamp(10px, 1.8vw, 14px) clamp(10px, 1.6vw, 14px); font-size: clamp(13px, 1.6vw, 15px); font-weight: 700;
+  border: 2px solid #b3261e; border-radius: 999px; background: #fff; color: #b3261e; cursor: pointer;
+  text-align: center;
 }
+.reject-detail-btn.selected { background: #b3261e; color: #fff; }
 
 .qty-affected-label { display: block; font-size: 13px; color: #7a3630; margin-top: 16px; }
 /* Input first, +/- grouped together as one joined control after it — not
@@ -402,6 +450,7 @@ button.secondary {
 .added-item-row {
   background: #eaf3ec; border: 2px solid #2f5233; border-radius: 10px;
   overflow: hidden; margin-bottom: 10px;
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
 }
 .added-item-main {
   width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -424,6 +473,18 @@ button.secondary {
    flagged problem, it's just taking a just-added item back off. */
 .added-item-detail .unflag-btn { border-color: #2f5233; color: #2f5233; margin-top: 10px; }
 .added-item-detail .unflag-btn:active { background: #2f5233; color: #fff; }
+
+/* Briefly flashes a just-added item's row after scrollToAddedItemRow_
+   scrolls it into view, per G's "this transition needs to be more smooth...
+   i dont even know i actually added item and where to add qty etc" — makes
+   it unmistakable which row just appeared, not just that the list changed
+   somewhere. The transition lives on .added-item-row itself (above) so
+   removing this class after the timeout in JS fades it back out too, not
+   just snaps the highlight on. */
+.added-item-row.just-added-flash {
+  border-color: #f4b400;
+  box-shadow: 0 0 0 4px rgba(244, 180, 0, 0.35);
+}
 
 .photo-box { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
 .photo-preview {
