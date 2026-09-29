@@ -89,7 +89,17 @@ let flaggedItems = {};      // idx -> {item_code, item_name, size, qty, reason, 
 let countedItems = {};      // idx -> true, when Count Items mode has this row checked off (see renderItemPickList_)
 let countModeActive = false; // whether the Count Items per-row checkboxes are currently shown
 let itemSearchText_ = "";   // current text in the item search box (see #item-search-input)
-let activeSizeFilters_ = {}; // {"2in": true, ...} — sizes (plus the OTHER_SIZE_FILTER_KEY_ sentinel for "Everything Else") currently toggled on as quick filters, OR'd together
+// {"2in": true, ...} — sizes (plus the OTHER_SIZE_FILTER_KEY_ sentinel for
+// "Everything Else") currently toggled on as quick filters, OR'd together.
+// One shared state now (2026-09-29, per G's "only keep the top filter
+// buttons - just filters both areas") — it drives BOTH the stop's own item
+// pick list (renderItemPickList_) AND the add-item catalog search
+// (renderAddItemResults_), via the one button row rendered by
+// renderSizeFilterButtons_. There used to be a second, separate button row
+// (and a separate activeAddItemSizeFilters_ state) just for the add-item
+// catalog search — removed outright, not just hidden, since G's screenshot
+// showed two near-identical rows and asked to keep only the top one.
+let activeSizeFilters_ = {};
 // "Add Item" state — per G's "add the option to add items on the view."
 // See the ADD ITEM section further down for the functions that read/write
 // these. addedItems is keyed by a locally-assigned id (these items have no
@@ -99,7 +109,6 @@ let addedItems = {};
 let addedItemIdCounter_ = 0;
 let addItemPanelOpen_ = false;   // whether #add-item-panel is currently shown — preserved on a same-stop back-and-forth, like countModeActive
 let addItemSearchText_ = "";     // current text in #add-item-search-input
-let activeAddItemSizeFilters_ = {}; // same shape/OR'd-together pattern as activeSizeFilters_, but for the add-item catalog search (renderAddItemSizeFilterButtons_/renderAddItemResults_) — a separate object since it filters the whole catalog, not one stop's line items
 let itemsCatalog_ = null;        // the full ERP items catalog, once fetched — see loadItemsCatalog_. Deliberately module-level (not per-stop): once loaded it's reused for every stop the rest of the shift, not re-fetched each time this panel is opened.
 let itemsCatalogLoadPromise_ = null; // the in-flight fetch, if any — so opening the panel twice quickly doesn't fire two requests
 let sigPad = { ctx: null, drawing: false, hasStroke: false };
@@ -865,7 +874,6 @@ function wireStopScreen() {
     syncAddItemPanel_();
     if (addItemPanelOpen_ && !itemsCatalog_) {
       loadItemsCatalog_().then(() => {
-        renderAddItemSizeFilterButtons_();
         if (addItemPanelOpen_) renderAddItemResults_();
       });
     }
@@ -1182,7 +1190,6 @@ function openStopScreen_(stop) {
     addedItems = {};
     addItemPanelOpen_ = false;
     addItemSearchText_ = "";
-    activeAddItemSizeFilters_ = {};
     clearSignaturePad_();
     clearRackPhoto_();
     clearSkipReason_();
@@ -1369,6 +1376,20 @@ const OTHER_SIZE_FILTER_KEY_ = "__other__";
 // every item that ISN'T 2in/4in/6in — including one with no size at all —
 // in one button instead of a button per odd size (3in, 5in, 8in, 10in,
 // 14in, ...); it only shows up if this stop actually has one of those.
+//
+// ONE ROW, FILTERS BOTH AREAS (2026-09-29, per G's screenshot of two
+// near-identical filter rows + "only keep the top filter buttons - just
+// filters both areas"): there used to be a second copy of this exact row
+// (renderAddItemSizeFilterButtons_, now removed) built from the full items
+// catalog and filtering only the add-item catalog search
+// (renderAddItemResults_) through its own separate activeAddItemSizeFilters_
+// state. Now this one row/state does both — a tap here re-renders the
+// stop's own item pick list AND, if the add-item panel is currently open,
+// the add-item catalog results too, via the same activeSizeFilters_. The
+// buttons themselves are still built from this STOP's own line items (not
+// the full catalog) — unchanged from before this merge — so a size the
+// catalog carries but this stop's own order doesn't won't get its own quick
+// filter; a driver can still find it by typing in the add-item search box.
 function renderSizeFilterButtons_(stop) {
   const row = document.getElementById("size-filter-row");
   row.innerHTML = "";
@@ -1391,18 +1412,28 @@ function renderSizeFilterButtons_(stop) {
   }
   row.classList.remove("hidden");
 
+  // Re-renders whichever area(s) this filter row now drives — always the
+  // item pick list, and the add-item catalog results too when that panel
+  // is currently open (no-op otherwise; renderAddItemResults_ just targets
+  // a hidden panel's DOM).
+  function rerenderFiltered_() {
+    renderItemPickList_(stop);
+    if (addItemPanelOpen_) renderAddItemResults_();
+  }
+
   sizes.forEach((size) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "size-filter-btn" + (activeSizeFilters_[size] ? " selected" : "");
     btn.textContent = size;
     // Multiple sizes can be active at once (OR'd together in
-    // renderItemPickList_) — tapping just toggles this one size on/off,
-    // same pattern as a reason-btn but without the mutual exclusivity.
+    // renderItemPickList_/renderAddItemResults_) — tapping just toggles
+    // this one size on/off, same pattern as a reason-btn but without the
+    // mutual exclusivity.
     btn.addEventListener("click", () => {
       activeSizeFilters_[size] = !activeSizeFilters_[size];
       btn.classList.toggle("selected", !!activeSizeFilters_[size]);
-      renderItemPickList_(stop);
+      rerenderFiltered_();
     });
     row.appendChild(btn);
   });
@@ -1413,76 +1444,12 @@ function renderSizeFilterButtons_(stop) {
     btn.className = "size-filter-btn" + (activeSizeFilters_[OTHER_SIZE_FILTER_KEY_] ? " selected" : "");
     btn.textContent = "Everything Else";
     // Same OR-with-the-others toggle behavior as a real size button — see
-    // renderItemPickList_ for how this sentinel key is read back out.
+    // renderItemPickList_/renderAddItemResults_ for how this sentinel key
+    // is read back out.
     btn.addEventListener("click", () => {
       activeSizeFilters_[OTHER_SIZE_FILTER_KEY_] = !activeSizeFilters_[OTHER_SIZE_FILTER_KEY_];
       btn.classList.toggle("selected", !!activeSizeFilters_[OTHER_SIZE_FILTER_KEY_]);
-      renderItemPickList_(stop);
-    });
-    row.appendChild(btn);
-  }
-}
-
-// Same 2in/4in/6in + Everything Else quick-filter pattern as
-// renderSizeFilterButtons_ above, but for the add-item catalog search — per
-// G's "To add item search have size filter button applied as well." Reads
-// sizes from itemsCatalog_ (the full ~9,000-row catalog) rather than one
-// stop's line items, filters activeAddItemSizeFilters_ (its own, separate
-// OR'd-together state — see that variable's declaration comment) instead of
-// activeSizeFilters_, and re-renders #add-item-results instead of the item
-// pick list. Called from syncAddItemPanel_ (every time the panel opens/
-// re-renders) and after the catalog first loads, so the buttons are correct
-// whether the catalog was already cached or not yet.
-function renderAddItemSizeFilterButtons_() {
-  const row = document.getElementById("add-item-size-filter-row");
-  if (!row) return;
-  row.innerHTML = "";
-
-  if (!itemsCatalog_ || itemsCatalog_.length === 0) {
-    row.classList.add("hidden");
-    return;
-  }
-
-  const presentSizes = {};
-  let hasOtherSizes = false;
-  itemsCatalog_.forEach((it) => {
-    const s = (it.size || "").trim();
-    if (s && QUICK_FILTER_SIZES_.indexOf(s) !== -1) {
-      presentSizes[s] = true;
-    } else {
-      hasOtherSizes = true;
-    }
-  });
-  const sizes = QUICK_FILTER_SIZES_.filter((s) => presentSizes[s]);
-
-  if (sizes.length === 0 && !hasOtherSizes) {
-    row.classList.add("hidden");
-    return;
-  }
-  row.classList.remove("hidden");
-
-  sizes.forEach((size) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "size-filter-btn" + (activeAddItemSizeFilters_[size] ? " selected" : "");
-    btn.textContent = size;
-    btn.addEventListener("click", () => {
-      activeAddItemSizeFilters_[size] = !activeAddItemSizeFilters_[size];
-      btn.classList.toggle("selected", !!activeAddItemSizeFilters_[size]);
-      renderAddItemResults_();
-    });
-    row.appendChild(btn);
-  });
-
-  if (hasOtherSizes) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "size-filter-btn" + (activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_] ? " selected" : "");
-    btn.textContent = "Everything Else";
-    btn.addEventListener("click", () => {
-      activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_] = !activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_];
-      btn.classList.toggle("selected", !!activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_]);
-      renderAddItemResults_();
+      rerenderFiltered_();
     });
     row.appendChild(btn);
   }
@@ -1524,7 +1491,6 @@ function syncAddItemPanel_() {
   const addItemSearchInput = document.getElementById("add-item-search-input");
   addItemSearchInput.value = addItemSearchText_;
   syncSearchClearBtn_(addItemSearchInput, document.getElementById("add-item-search-clear-btn"));
-  renderAddItemSizeFilterButtons_();
   if (addItemPanelOpen_) renderAddItemResults_();
 }
 
@@ -1593,14 +1559,17 @@ function renderAddItemResults_() {
   }
 
   const q = addItemSearchText_.trim().toLowerCase();
-  // Size filters (activeAddItemSizeFilters_, same OR'd-together pattern as
-  // the stop's own item list — see renderAddItemSizeFilterButtons_) can
-  // narrow the catalog on their own, without any typed text, same as they do
-  // on the item pick list. Only block on "type to search" when NEITHER a
-  // search term nor a size filter is active — otherwise a size-only browse
-  // (e.g. "just show me every 4in item") would be impossible.
-  const activeAddSizes = Object.keys(activeAddItemSizeFilters_).filter((s) => s !== OTHER_SIZE_FILTER_KEY_ && activeAddItemSizeFilters_[s]);
-  const addOtherActive = !!activeAddItemSizeFilters_[OTHER_SIZE_FILTER_KEY_];
+  // Size filters — activeSizeFilters_, the SAME shared state the top
+  // filter row (renderSizeFilterButtons_) also uses for the stop's own item
+  // pick list (2026-09-29, per G's "only keep the top filter buttons - just
+  // filters both areas"; there used to be a second, separate row/state just
+  // for this catalog search). Can narrow the catalog on its own, without any
+  // typed text, same as it does on the item pick list. Only block on "type
+  // to search" when NEITHER a search term nor a size filter is active —
+  // otherwise a size-only browse (e.g. "just show me every 4in item") would
+  // be impossible.
+  const activeAddSizes = Object.keys(activeSizeFilters_).filter((s) => s !== OTHER_SIZE_FILTER_KEY_ && activeSizeFilters_[s]);
+  const addOtherActive = !!activeSizeFilters_[OTHER_SIZE_FILTER_KEY_];
   const hasSizeFilter = activeAddSizes.length > 0 || addOtherActive;
   if (!q && !hasSizeFilter) {
     box.innerHTML = '<p class="hint">Type to search the item catalog.</p>';

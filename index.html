@@ -30,7 +30,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-09-29h">
+<link rel="stylesheet" href="style.css?v=2026-09-29i">
 </head>
 <body>
 
@@ -172,12 +172,11 @@
         <input type="text" id="add-item-search-input" class="item-search-input" placeholder="Search the item catalog&hellip;">
         <button type="button" class="search-clear-btn hidden" id="add-item-search-clear-btn" aria-label="Clear search">&times;</button>
       </div>
-      <!-- Size quick-filters for the item catalog search, per G's "To add
-           item search have size filter button applied as well" — same
-           2in/4in/6in + Everything Else pattern as the stop's own item list
-           (renderSizeFilterButtons_), just against the full catalog instead
-           of one stop's line items. See renderAddItemSizeFilterButtons_. -->
-      <div class="size-filter-row hidden" id="add-item-size-filter-row"></div>
+      <!-- No separate size-filter row here — per G's "only keep the top
+           filter buttons - just filters both areas," the one filter row
+           above the item list (#size-filter-row) now also filters this
+           catalog search. See renderSizeFilterButtons_/renderAddItemResults_
+           in app.js. -->
       <div id="add-item-results"></div>
     </div>
 
@@ -266,8 +265,8 @@
      inert "web" platform on its own, and the Preferences plugin quietly
      falls back to a plain (differently-prefixed) localStorage key that
      nothing here ever reads back on that build. Must load before app.js. -->
-<script src="capacitor.js?v=2026-09-29h"></script>
-<script src="capacitor-preferences-plugin.js?v=2026-09-29h"></script>
-<script src="app.js?v=2026-09-29h"></script>
+<script src="capacitor.js?v=2026-09-29i"></script>
+<script src="capacitor-preferences-plugin.js?v=2026-09-29i"></script>
+<script src="app.js?v=2026-09-29i"></script>
 </body>
 </html>
