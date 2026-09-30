@@ -727,8 +727,40 @@ function renderRouteList_() {
     pill.className = "status-pill";
     pill.textContent = statusToLabel_(status);
 
+    // Right-hand column: status pill + a "Map" action button, per G's "on
+    // this view add on each of the stops an action button that opens
+    // address in maps" — this view (the route list) only ever showed the
+    // address as plain text inside the card, unlike the stop-detail screen,
+    // which already has the address itself as a tappable maps link (see
+    // mapsUrlForAddress_/the address-link rule elsewhere in this file). A
+    // dedicated button here means a driver can jump straight to
+    // navigation from the route list without opening the stop first. Real
+    // <a target="_blank"> (same convention as that other link), not a JS
+    // window.open() — works the same on Android and iOS with no user-agent
+    // branching. It's nested inside the whole-card click target that opens
+    // the stop (card.addEventListener("click", ...) below), so its own
+    // click listener stops propagation — same pattern as every other
+    // nested control inside a bigger tap target in this file (see e.g.
+    // buildExceptionInlineForm_) — otherwise tapping "Map" would ALSO open
+    // the stop screen underneath the new tab. No address on file -> no
+    // button, same as the stop-detail screen's own address link.
+    const right = document.createElement("div");
+    right.className = "stop-card-right";
+    right.appendChild(pill);
+    if (stop.address) {
+      const mapBtn = document.createElement("a");
+      mapBtn.className = "stop-card-map-btn";
+      mapBtn.href = mapsUrlForAddress_(stop.address);
+      mapBtn.target = "_blank";
+      mapBtn.rel = "noopener";
+      mapBtn.textContent = "Map";
+      mapBtn.setAttribute("aria-label", "Open " + stop.customer_name + "'s address in Maps");
+      mapBtn.addEventListener("click", (e) => e.stopPropagation());
+      right.appendChild(mapBtn);
+    }
+
     card.appendChild(left);
-    card.appendChild(pill);
+    card.appendChild(right);
 
     card.addEventListener("click", () => openStopScreen_(stop));
     list.appendChild(card);
@@ -2007,7 +2039,24 @@ function renderItemPickList_(stop) {
   });
 
   if (allItems.length === 0) {
-    list.innerHTML = '<p class="hint">No line items on file for this stop — see the note on the previous screen.</p>';
+    // Was "— see the note on the previous screen," pointing at a note that
+    // doesn't actually exist anywhere in this app (2026-09-30, per G's "check
+    // why there is no items" on a real stop showing this exact message).
+    // getLineItems_ returning empty here means mergeStopsWithPdfData_
+    // (Code.gs) found no matching order block for this order in the day's
+    // PDF when "Create Route Plan..." last ran — a known, tracked gap (see
+    // PROJECT-NOTES.md) — and it DOES write a specific reason for it (e.g.
+    // "No PDF match for order #... — line items missing for that order"),
+    // but only into the "Route Plan" Sheet tab's notes column for office,
+    // never into the published route plan the driver's app reads (see
+    // publishRoutePlan_) — a deliberate call from 2026-09-23 to keep
+    // office-only data-quality text off the driver's screen (see
+    // PROJECT-NOTES.md). So there genuinely is no note on this or any other
+    // screen for a driver to go find; telling them to look for one was
+    // simply wrong. Now says what's actually true and gives an actual next
+    // step available right here, rather than sending the driver hunting for
+    // something that isn't there.
+    list.innerHTML = '<p class="hint">No line items on file for this stop — the office\'s route-plan build didn\'t find a matching order in today\'s PDF. Check with the office, or use "+ Add Item" below to enter what\'s actually being delivered.</p>';
   } else if (visible.length === 0) {
     list.innerHTML = '<p class="hint">No items match your search/filter.</p>';
   }

@@ -151,6 +151,25 @@ button.secondary {
   background: #eee; color: #555;
 }
 .stop-card.done .status-pill { background: #dcf3e3; color: #1f6b39; }
+/* Right-hand column on a route-list card: the status pill, and (2026-09-30,
+   per G's "add on each of the stops an action button that opens address in
+   maps") a "Map" button stacked below it. flex-end so both stay pinned to
+   the card's right edge same as the pill always was; the gap keeps the
+   button from crowding straight under the pill. */
+.stop-card-right {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: 0 0 auto; margin-left: 12px;
+}
+/* Real tap target sized for a moving truck (same "big tap target" reasoning
+   as every other driver-facing control in this app, e.g. .item-pick-main) —
+   not a tiny icon-only link. Outlined rather than filled so it doesn't
+   visually compete with the status pill right above it or the primary
+   green buttons elsewhere in the app. */
+.stop-card-map-btn {
+  display: block; font-size: 13px; font-weight: 700; text-decoration: none;
+  padding: 8px 14px; border-radius: 999px; border: 2px solid #2f5233; color: #2f5233; background: #fff;
+  white-space: nowrap;
+}
+.stop-card-map-btn:active { background: #eaf2ec; }
 
 .queue-banner {
   background: #fff4cc; color: #7a5b00; padding: 10px 16px; font-size: 14px; text-align: center;
