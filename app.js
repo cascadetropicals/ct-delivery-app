@@ -2120,78 +2120,96 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
   form.className = "exception-inline";
   form.addEventListener("click", (e) => e.stopPropagation());
 
-  // Built before reasonRow (not after) so the reason buttons' own click
-  // handlers below can reference it directly — declaration order in this
-  // function, not DOM insertion order (that's set by the appendChild calls
-  // further down, reasonRow first).
-  //
-  // A real native <select> now — per G's 2026-10-02 "make so i click and
-  // basically in the button or so is opening a dropdown... its basically
-  // just 3 different rejection options," explicitly asked for on THIS field
-  // only ("number 2 but only on the rejected button"), overriding the
-  // general pill-buttons-not-a-select rule the rest of this app still
-  // follows (see .reason-btn-row's own CSS comment) — this one field went
-  // dropdown -> required pill row -> back to dropdown as G's own thinking on
-  // it evolved; each change is a real, explicit ask, not a reversal to
-  // second-guess. Still required, not optional: findMissingRejectReason_
-  // (called from the Next: Signature button in wireStopScreen) blocks moving
-  // on until a Rejected line has one of these picked, same as before.
-  const rejectDetailRow = document.createElement("div");
-  rejectDetailRow.className = "reject-detail-row" + (ex.reason === "Rejected" ? "" : " hidden");
-  const rejectDetailLabel = document.createElement("div");
-  rejectDetailLabel.className = "reject-detail-label";
-  rejectDetailLabel.textContent = "Why rejected?";
-  rejectDetailRow.appendChild(rejectDetailLabel);
-  const rejectDetailSelect = document.createElement("select");
-  rejectDetailSelect.className = "reject-detail-select";
-  const placeholderOpt = document.createElement("option");
-  placeholderOpt.value = "";
-  placeholderOpt.textContent = "Select a reason…";
-  rejectDetailSelect.appendChild(placeholderOpt);
+  // "Rejected" IS the dropdown now — per G's same-day follow-up, "the why
+  // rejected dropdown should be in the rejected button - so i click the
+  // rejected button but then i actually choose from dropdown!" The first
+  // 2026-10-02 pass still had a separate "Why rejected?" dropdown below a
+  // plain "Rejected" button, which wasn't what was asked for — this
+  // collapses the two into ONE control: a <select> shaped like the other
+  // two reason pills, reading "Rejected" in its closed state until a
+  // specific reason is picked, then showing that reason directly. Tapping
+  // ANY of its options (including the bare "Rejected" placeholder) sets
+  // ex.reason to "Rejected" in the same action; picking one of the 3 real
+  // options also sets ex.reject_detail. Missing/Shipping Damage stay plain
+  // buttons, unchanged — this is scoped to Rejected only, per G's "number 2
+  // but only on the rejected button." Still required, not optional:
+  // findMissingRejectReason_ (called from the Next: Signature button in
+  // wireStopScreen) blocks moving on until a Rejected line has picked one
+  // of the 3 real options, not just left on the bare "Rejected" placeholder.
+  const otherReasonButtons = [];
+
+  function syncRejectedSelectClass_() {
+    rejectedSelect.className = "reason-btn reason-select-rejected" + (ex.reason === "Rejected" ? " selected" : "");
+  }
+
+  const rejectedSelect = document.createElement("select");
+  const rejectedPlaceholderOpt = document.createElement("option");
+  rejectedPlaceholderOpt.value = "";
+  rejectedPlaceholderOpt.textContent = "Rejected";
+  rejectedSelect.appendChild(rejectedPlaceholderOpt);
   REJECT_DETAIL_OPTIONS.forEach((opt) => {
     const optionEl = document.createElement("option");
     optionEl.value = opt;
     optionEl.textContent = opt;
-    rejectDetailSelect.appendChild(optionEl);
+    rejectedSelect.appendChild(optionEl);
   });
-  rejectDetailSelect.value = ex.reject_detail || "";
-  rejectDetailSelect.classList.toggle("placeholder", !rejectDetailSelect.value);
-  rejectDetailSelect.addEventListener("change", () => {
-    ex.reject_detail = rejectDetailSelect.value;
-    rejectDetailSelect.classList.toggle("placeholder", !rejectDetailSelect.value);
+  rejectedSelect.value = ex.reason === "Rejected" ? (ex.reject_detail || "") : "";
+  syncRejectedSelectClass_();
+  // "change" alone isn't enough: if the line is currently Missing/Shipping
+  // Damage (so the select sits on its blank "Rejected" placeholder, value
+  // ""), and the driver reopens the dropdown and taps that SAME placeholder
+  // again without picking a real sub-reason, the native <select> never fires
+  // "change" (its value didn't move) — so ex.reason would silently stay
+  // Missing/Shipping Damage even though the box now visually shows
+  // "Rejected." "mousedown" fires the instant the control is tapped, before
+  // the native picker even opens, so it's what actually makes "I click the
+  // rejected button" (opening this dropdown at all) switch the line to
+  // Rejected — exactly as G described it, with "then I choose from dropdown"
+  // handled separately below by "change" once a specific reason is picked.
+  // Guarded to no-op while already on Rejected, so reopening the dropdown to
+  // change an existing pick doesn't wipe out reject_detail first.
+  rejectedSelect.addEventListener("mousedown", () => {
+    if (ex.reason === "Rejected") return;
+    ex.reason = "Rejected";
+    ex.reject_detail = "";
+    rejectedSelect.value = "";
+    syncRejectedSelectClass_();
+    otherReasonButtons.forEach((b) => b.classList.remove("selected"));
     updateItemPickStatus_(statusEl, ex, true);
   });
-  rejectDetailRow.appendChild(rejectDetailSelect);
+  rejectedSelect.addEventListener("change", () => {
+    ex.reason = "Rejected";
+    ex.reject_detail = rejectedSelect.value;
+    syncRejectedSelectClass_();
+    otherReasonButtons.forEach((b) => b.classList.remove("selected"));
+    updateItemPickStatus_(statusEl, ex, true);
+  });
 
   const reasonRow = document.createElement("div");
   reasonRow.className = "reason-btn-row";
-  EXCEPTION_REASONS.forEach((r) => {
+  reasonRow.appendChild(rejectedSelect);
+  ["Missing", "Shipping Damage"].forEach((r) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "reason-btn" + (ex.reason === r ? " selected" : "");
     btn.textContent = r;
     btn.addEventListener("click", () => {
       ex.reason = r;
-      reasonRow.querySelectorAll(".reason-btn").forEach((b) => b.classList.remove("selected"));
+      // The sub-reason only ever applies to "Rejected" — switching to a
+      // different reason clears whatever was picked (rather than leaving a
+      // stale "Pests" silently attached to a "Missing" flag) and resets the
+      // Rejected select back to its bare placeholder.
+      ex.reject_detail = "";
+      rejectedSelect.value = "";
+      syncRejectedSelectClass_();
+      otherReasonButtons.forEach((b) => b.classList.remove("selected"));
       btn.classList.add("selected");
-      // The sub-reason dropdown only ever applies to "Rejected" — switching
-      // to a different reason clears whatever was picked (rather than
-      // leaving a stale "Pests" silently attached to a "Missing" flag) and
-      // hides the row; switching back to "Rejected" reveals it again, empty.
-      if (r === "Rejected") {
-        rejectDetailRow.classList.remove("hidden");
-      } else {
-        ex.reject_detail = "";
-        rejectDetailSelect.value = "";
-        rejectDetailSelect.classList.add("placeholder");
-        rejectDetailRow.classList.add("hidden");
-      }
       updateItemPickStatus_(statusEl, ex, true);
     });
+    otherReasonButtons.push(btn);
     reasonRow.appendChild(btn);
   });
   form.appendChild(reasonRow);
-  form.appendChild(rejectDetailRow);
 
   // Capped at the ordered qty (ex.qty) — can't reject/flag more units of an
   // item than were actually on the order (see PROJECT-NOTES.md — this needs
@@ -2314,27 +2332,45 @@ function wireSignatureScreen() {
 // this screen itself (signature, rack photo) can change it, so there's no
 // need to re-render it live while the driver is on this page.
 //
-// "Units/dollars being dropped off" is deliberately a DIFFERENT number from
-// the invoiced Total shown elsewhere (getStopTotal_/payloadTotal in
+// Per G's "are you bullshitting what is this - what should it say / make it
+// basically show this was units and $ before - these changes have been made
+// (additions, rejections etc) - this is the new total units and total $ -
+// this is how much total $ changed" — a lone "-1 Ficus — Rejected - Pests"
+// line under a single total with no "before" to compare it to was
+// meaningless to a customer. So this now shows FOUR things in order: (1)
+// Before — the as-ordered units/$ with nothing touched yet, (2) Changes — the
+// same per-line discrepancy list as before (red = exception, blue = added),
+// (3) Now — the new units/$ actually being dropped off today, (4) Total
+// change — how much the $ moved, signed and colored the same red/blue way.
+// "Before"/"Now" here are both still deliberately DIFFERENT from the
+// invoiced Total shown elsewhere (getStopTotal_/payloadTotal in
 // buildStopPdfPayload_) — that figure stays at the original invoiced amount
 // on purpose, since GrowFlo issues a corrected invoice separately for any
 // rejection/short/damage (see the exceptionsNote in Code.gs's
-// sendDeliveryEmail_). This is the actual physical qty/value left at this
-// stop today: ordered qty minus whatever was flagged, plus whatever was
-// added — so a driver/customer sanity-check figure, not a billing one.
+// sendDeliveryEmail_). "Before"/"Now" are both the actual physical qty/value
+// (ordered vs. ordered-minus-flagged-plus-added) — a driver/customer
+// sanity-check pair, not a billing figure.
 function renderDeliveryRecap_(stop) {
   const totalsEl = document.getElementById("recap-totals");
   const discEl = document.getElementById("recap-discrepancies");
   if (!totalsEl || !discEl) return;
 
   const lineItems = getLineItems_(stop);
-  let totalUnits = 0;
-  let totalDollars = 0;
+  let beforeUnits = 0;
+  let beforeDollars = 0;
+  let afterUnits = 0;
+  let afterDollars = 0;
   let hasUnpriced = false;
   const discrepancyLines = [];
 
   lineItems.forEach((li, idx) => {
     const orderedQty = Number(li.qty) || 0;
+    const noPrice = li.unit_price == null;
+    if (orderedQty > 0 && noPrice) hasUnpriced = true;
+
+    beforeUnits += orderedQty;
+    if (!noPrice) beforeDollars += Number(li.unit_price) * orderedQty;
+
     const ex = flaggedItems[idx];
     let deliveredQty = orderedQty;
     if (ex) {
@@ -2347,18 +2383,15 @@ function renderDeliveryRecap_(stop) {
         notes: ex.notes || "",
       });
     }
-    totalUnits += deliveredQty;
-    if (deliveredQty > 0) {
-      if (li.unit_price != null) totalDollars += Number(li.unit_price) * deliveredQty;
-      else hasUnpriced = true;
-    }
+    afterUnits += deliveredQty;
+    if (!noPrice) afterDollars += Number(li.unit_price) * deliveredQty;
   });
 
   Object.values(addedItems).forEach((it) => {
     let qty = Number(it.qty);
     if (!isFinite(qty) || qty < 1) qty = 1;
-    totalUnits += qty;
-    if (it.unit_price != null) totalDollars += Number(it.unit_price) * qty;
+    afterUnits += qty;
+    if (it.unit_price != null) afterDollars += Number(it.unit_price) * qty;
     else hasUnpriced = true;
     discrepancyLines.push({
       label: (it.item_name || it.common_name || "Added item") + (it.size ? " (" + it.size + ")" : ""),
@@ -2369,25 +2402,61 @@ function renderDeliveryRecap_(stop) {
     });
   });
 
-  totalsEl.textContent =
-    totalUnits + " unit" + (totalUnits === 1 ? "" : "s") + " · $" + totalDollars.toFixed(2) + " being dropped off today" +
-    (hasUnpriced ? " (some items have no price on file, not included in that dollar figure)" : "");
+  const unpricedNote = hasUnpriced ? "Some items have no price on file — not included in these dollar figures." : "";
+
+  totalsEl.innerHTML = "";
+  if (discrepancyLines.length === 0) {
+    const row = document.createElement("div");
+    row.className = "recap-exact-row";
+    row.textContent =
+      afterUnits + " unit" + (afterUnits === 1 ? "" : "s") + " · $" + afterDollars.toFixed(2) +
+      " being dropped off today — delivered exactly as ordered.";
+    totalsEl.appendChild(row);
+  } else {
+    const changeDollars = afterDollars - beforeDollars;
+    const changeSign = changeDollars > 0 ? "+" : changeDollars < 0 ? "-" : "";
+    const changeClass = changeDollars > 0 ? " recap-change-up" : changeDollars < 0 ? " recap-change-down" : "";
+
+    const beforeRow = document.createElement("div");
+    beforeRow.className = "recap-before-row";
+    beforeRow.textContent =
+      "Before: " + beforeUnits + " unit" + (beforeUnits === 1 ? "" : "s") + " · $" + beforeDollars.toFixed(2);
+    totalsEl.appendChild(beforeRow);
+
+    const nowRow = document.createElement("div");
+    nowRow.className = "recap-now-row";
+    nowRow.textContent =
+      "Now: " + afterUnits + " unit" + (afterUnits === 1 ? "" : "s") + " · $" + afterDollars.toFixed(2) +
+      " being dropped off today";
+    totalsEl.appendChild(nowRow);
+
+    const changeRow = document.createElement("div");
+    changeRow.className = "recap-change-row" + changeClass;
+    changeRow.textContent = "Total change: " + changeSign + "$" + Math.abs(changeDollars).toFixed(2);
+    totalsEl.appendChild(changeRow);
+  }
+
+  if (unpricedNote) {
+    const note = document.createElement("div");
+    note.className = "recap-unpriced-note";
+    note.textContent = unpricedNote;
+    totalsEl.appendChild(note);
+  }
 
   discEl.innerHTML = "";
-  if (discrepancyLines.length === 0) {
-    const none = document.createElement("div");
-    none.className = "recap-none";
-    none.textContent = "No discrepancies — delivered exactly as ordered.";
-    discEl.appendChild(none);
-    return;
+  if (discrepancyLines.length > 0) {
+    const changesTitle = document.createElement("div");
+    changesTitle.className = "recap-changes-title";
+    changesTitle.textContent = "Changes:";
+    discEl.appendChild(changesTitle);
+    discrepancyLines.forEach((d) => {
+      const row = document.createElement("div");
+      row.className = "recap-disc-row" + (d.isAdded ? " recap-disc-added" : "");
+      const qtySign = d.isAdded ? "+" : "-";
+      row.textContent = qtySign + d.qtyChange + " " + d.label + " — " + d.reason + (d.notes ? " (" + d.notes + ")" : "");
+      discEl.appendChild(row);
+    });
   }
-  discrepancyLines.forEach((d) => {
-    const row = document.createElement("div");
-    row.className = "recap-disc-row" + (d.isAdded ? " recap-disc-added" : "");
-    const qtySign = d.isAdded ? "+" : "-";
-    row.textContent = qtySign + d.qtyChange + " " + d.label + " — " + d.reason + (d.notes ? " (" + d.notes + ")" : "");
-    discEl.appendChild(row);
-  });
 }
 
 function openSignatureScreen_(stop) {

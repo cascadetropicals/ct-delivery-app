@@ -364,31 +364,38 @@ button.secondary {
 }
 .reason-btn.selected { background: #b3261e; color: #fff; }
 
-/* Rejected-only sub-reason picker — per G's "when i choose rejected have
-   dropdown with options: damaged leafs, pests, too small," then later "make
-   so the currently optional dropdown is popping up directly and i have to
-   choose the reason why rejected," and most recently (2026-10-02) "make so i
+/* "Rejected" IS its own sub-reason dropdown now — per G's "when i choose
+   rejected have dropdown with options: damaged leafs, pests, too small,"
+   then "make so the currently optional dropdown is popping up directly and
+   i have to choose the reason why rejected," then (2026-10-02) "make so i
    click and basically in the button or so is opening a dropdown... its
-   basically just 3 different rejection options" — explicitly asking for a
-   real native <select> here, specifically for this one field, overriding
-   the general "pill buttons, not <select>" rule .reason-btn-row above still
-   follows for everything else in this app. Tapping it opens the device's own
-   dropdown overlay (so "i click and it opens a dropdown" is just what a
-   native select already does), and the current pick shows right in the
-   closed box — no separate "selected" styling needed, the box itself is the
-   answer. Shown/hidden by buildExceptionInlineForm_ depending on which
-   top-level reason pill is selected, never a separate reason of its own.
-   Styled with the same red accent as .reason-btn so it still reads as
-   "you must answer this," just as a dropdown instead of a button row. */
-.reject-detail-row { margin-top: 10px; }
-.reject-detail-row.hidden { display: none; }
-.reject-detail-label { font-size: 13px; font-weight: 700; color: #7a3630; margin-bottom: 6px; }
-.reject-detail-select {
-  width: 100%; box-sizing: border-box;
-  padding: clamp(12px, 2vw, 16px) clamp(12px, 1.8vw, 16px); font-size: clamp(14px, 1.8vw, 16px); font-weight: 700;
-  border: 2px solid #b3261e; border-radius: 10px; background: #fff; color: #b3261e; cursor: pointer;
+   basically just 3 different rejection options," and finally, same day,
+   the correction that mattered: "the why rejected dropdown should be in the
+   rejected button - so i click the rejected button but then i actually
+   choose from dropdown!" — i.e. ONE control, not a "Rejected" button plus a
+   separate dropdown below it. buildExceptionInlineForm_ (app.js) builds this
+   as a real <select> carrying className "reason-btn reason-select-rejected"
+   (plus "selected" when active) so .reason-btn above already gives it the
+   exact same pill border/fill/selected-state flip as the Missing/Shipping
+   Damage buttons next to it — this class only resets the native select
+   chrome and adds a caret so it still reads as "tap me to open a dropdown."
+   The closed box shows "Rejected" until a real reason is picked, then shows
+   that reason directly — no separate "selected" look needed beyond what
+   .reason-btn.selected already does. */
+.reason-select-rejected {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  text-align-last: center;
+  padding-right: 34px;
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 14px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b3261e' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
 }
-.reject-detail-select.placeholder { color: #b3261e; opacity: 0.7; font-weight: 600; }
+.reason-select-rejected.selected {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+}
 
 .qty-affected-label { display: block; font-size: 13px; color: #7a3630; margin-top: 16px; }
 /* Input first, +/- grouped together as one joined control after it — not
@@ -541,8 +548,21 @@ button.secondary {
    the customer gets a copy of agree with each other. See
    renderDeliveryRecap_ in app.js. */
 .delivery-recap { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
-.recap-totals { font-size: 17px; font-weight: 700; margin-top: 4px; }
-.recap-none { color: #2e7d32; font-weight: 600; margin-top: 8px; }
+.recap-totals { margin-top: 4px; }
+/* No changes at all — single line, green, since there's nothing to compare. */
+.recap-exact-row { font-size: 17px; font-weight: 700; color: #2e7d32; }
+/* Changes exist — three stacked lines, in order: as-ordered, then the new
+   actually-being-dropped-off figure (bold, the headline number), then how
+   much the $ moved, per G's "this was units and $ before - these changes
+   have been made - this is the new total units and total $ - this is how
+   much total $ changed". */
+.recap-before-row { font-size: 15px; color: #555; }
+.recap-now-row { font-size: 17px; font-weight: 700; margin-top: 2px; }
+.recap-change-row { font-size: 15px; font-weight: 700; margin-top: 4px; }
+.recap-change-down { color: #b3261e; }
+.recap-change-up { color: #1155cc; }
+.recap-unpriced-note { font-size: 12px; color: #888; margin-top: 6px; }
+.recap-changes-title { font-size: 13px; text-transform: uppercase; color: #666; font-weight: 700; margin: 10px 0 2px; }
 .recap-disc-row { padding: 6px 0; border-top: 1px solid #eee; color: #b3261e; font-size: 14px; }
 .recap-disc-row:first-child { border-top: none; }
 .recap-disc-added { color: #1155cc; }
