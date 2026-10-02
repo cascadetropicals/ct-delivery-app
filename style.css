@@ -367,24 +367,28 @@ button.secondary {
 /* Rejected-only sub-reason picker — per G's "when i choose rejected have
    dropdown with options: damaged leafs, pests, too small," then later "make
    so the currently optional dropdown is popping up directly and i have to
-   choose the reason why rejected." Shown/hidden by buildExceptionInlineForm_
-   depending on which reason pill is selected, never a separate reason of its
-   own. Direct pill buttons now, not a <select> — same reasoning as
-   .reason-btn-row just above: no dropdown to open on a tablet, and the
-   current pick is visible without tapping in. Smaller/lighter than the
-   top-level .reason-btn row (this is a sub-choice, not the main one), but
-   same underlying pattern. */
+   choose the reason why rejected," and most recently (2026-10-02) "make so i
+   click and basically in the button or so is opening a dropdown... its
+   basically just 3 different rejection options" — explicitly asking for a
+   real native <select> here, specifically for this one field, overriding
+   the general "pill buttons, not <select>" rule .reason-btn-row above still
+   follows for everything else in this app. Tapping it opens the device's own
+   dropdown overlay (so "i click and it opens a dropdown" is just what a
+   native select already does), and the current pick shows right in the
+   closed box — no separate "selected" styling needed, the box itself is the
+   answer. Shown/hidden by buildExceptionInlineForm_ depending on which
+   top-level reason pill is selected, never a separate reason of its own.
+   Styled with the same red accent as .reason-btn so it still reads as
+   "you must answer this," just as a dropdown instead of a button row. */
 .reject-detail-row { margin-top: 10px; }
 .reject-detail-row.hidden { display: none; }
 .reject-detail-label { font-size: 13px; font-weight: 700; color: #7a3630; margin-bottom: 6px; }
-.reject-detail-btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
-.reject-detail-btn {
-  flex: 1 1 100px;
-  padding: clamp(10px, 1.8vw, 14px) clamp(10px, 1.6vw, 14px); font-size: clamp(13px, 1.6vw, 15px); font-weight: 700;
-  border: 2px solid #b3261e; border-radius: 999px; background: #fff; color: #b3261e; cursor: pointer;
-  text-align: center;
+.reject-detail-select {
+  width: 100%; box-sizing: border-box;
+  padding: clamp(12px, 2vw, 16px) clamp(12px, 1.8vw, 16px); font-size: clamp(14px, 1.8vw, 16px); font-weight: 700;
+  border: 2px solid #b3261e; border-radius: 10px; background: #fff; color: #b3261e; cursor: pointer;
 }
-.reject-detail-btn.selected { background: #b3261e; color: #fff; }
+.reject-detail-select.placeholder { color: #b3261e; opacity: 0.7; font-weight: 600; }
 
 .qty-affected-label { display: block; font-size: 13px; color: #7a3630; margin-top: 16px; }
 /* Input first, +/- grouped together as one joined control after it — not
@@ -520,6 +524,28 @@ button.secondary {
 .skip-reason-box select {
   width: 100%; padding: 10px; font-size: 15px; border: 1px solid #ccc; border-radius: 8px; margin-top: 6px; background: #fff;
 }
+
+/* Per G's "on submit page add option for driver to type in a different
+   email to send the final invoice to" — same field styling as the
+   skip-reason box right above it. */
+.extra-email-box { margin-top: 14px; }
+.extra-email-box input {
+  width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; border: 1px solid #ccc; border-radius: 8px; margin-top: 6px; background: #fff;
+}
+
+/* Delivery recap, per G's "on signature page or just prior - display a
+   recap of all discrepancies for the customer to see. also display total
+   units and dollars being dropped off." Red/blue match the signed PDF's
+   own Delivery Adjustments color convention (reductions red, additions
+   blue — see buildDeliveryPdfBlob_ in Code.gs) so this screen and the PDF
+   the customer gets a copy of agree with each other. See
+   renderDeliveryRecap_ in app.js. */
+.delivery-recap { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+.recap-totals { font-size: 17px; font-weight: 700; margin-top: 4px; }
+.recap-none { color: #2e7d32; font-weight: 600; margin-top: 8px; }
+.recap-disc-row { padding: 6px 0; border-top: 1px solid #eee; color: #b3261e; font-size: 14px; }
+.recap-disc-row:first-child { border-top: none; }
+.recap-disc-added { color: #1155cc; }
 
 canvas#sig-pad { width: 100%; height: 220px; background: #fff; border: 2px dashed #999; border-radius: 10px; touch-action: none; }
 

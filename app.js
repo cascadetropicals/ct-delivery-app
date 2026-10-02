@@ -9,11 +9,10 @@
  *       Office runs the Sheet menu's "Create Route Plan..." (one step — builds AND publishes)
  *       and the app picks it up on the driver's next login — no GitHub involved.
  *       As of 2026-09-24 this is a TWO-PHASE fetch, not one: init() first fetches
- *       "?action=get_trucks" (small, always live — just today's truck list, so the login
- *       screen is never showing a stale/cached set of trucks) and paints the login screen
+ *       "?action=get_trucks" (small — just today's truck list) and paints the login screen
  *       from that, then fetches the full "?action=get_route_plan" (every stop, every line
- *       item — the slow part) in the background via loadFullRoutePlan_. See init()'s own
- *       comment for the full rationale and Code.gs's getTrucksForRequest_ /
+ *       item — the bigger response) in the background via loadFullRoutePlan_. See init()'s
+ *       own comment for the full rationale and Code.gs's getTrucksForRequest_ /
  *       getRoutePlanForRequest_ / publishRoutePlan_ and PROJECT-NOTES.md.
  *       This fetched data still lives in a JS variable/property named "manifest" throughout
  *       this file below (kept as-is on purpose when the backend was renamed to "route plan" —
@@ -29,6 +28,15 @@
  *       stable per-stop identity everywhere LOCAL DRIVER-STATE PERSISTENCE cares about one,
  *       since stop_id itself can change on a live refresh (a truck/time reassignment) — see
  *       stopKey_'s own comment.
+ *       As of 2026-09-30, BOTH phase 1 and phase 2 above are pure static file reads — the
+ *       live ERP-outFuture rebuild (previously done inline on every get_trucks/get_route_plan
+ *       call, which made the app's core load path depend on a live Sheets round trip) moved
+ *       entirely into the LIVE ROUTE-PLAN REFRESH mechanism: it fires once in the background
+ *       right after the initial load, then on its usual timer — never gating what the driver
+ *       sees. Per G's "it should not be pulled fresh on every request! the app still should
+ *       work offline - this should be more of a thing if there is good connection etc it
+ *       reads the live data again but without slowing the app down." See
+ *       getRoutePlanForRequest_'s "PURE STATIC AGAIN" comment in Code.gs for the full history.
  *
  * Offline-first: two separate layers, both needed.
  *   1. service-worker.js caches the app SHELL (this file, style.css, index.html,
@@ -137,31 +145,41 @@ async function init() {
   // that painted a CACHED truck list immediately and silently swapped in
   // fresh data later — G flagged that as actively wrong, not just slow
   // ("trucks change... just the trucks that run that day load first and
-  // entire data loads after"): which trucks are running can change day to
-  // day, so showing a stale list — even for a couple seconds — risks a
-  // driver tapping a truck that isn't actually running today. So the truck
-  // list is now NEVER shown from a cache; the login screen simply waits
-  // for a small, fast, always-live fetch:
+  // entire data loads after"). Both phases below are, as of 2026-09-30,
+  // plain fast file reads — NEITHER does a live ERP-outFuture rebuild
+  // inline anymore (see the LIVE ROUTE-PLAN REFRESH kick a few lines down
+  // for where that moved) — so the two-phase split here is purely about
+  // response SIZE (today's trucks list vs. every stop's full line items),
+  // not about one phase being slow:
   //   1. get_trucks (loadFullRoutePlan_'s sibling, inline below) — a tiny
   //      file with just {dispatch_date, trucks, truck_drivers,
   //      truck_start_times}, written by publishRoutePlan_ alongside the
-  //      full route plan (see Code.gs). Nothing cached is ever painted for
-  //      this — only what this fetch actually returns, right now.
+  //      full route plan (see Code.gs).
   //   2. get_route_plan — the FULL route plan (every stop, every line
-  //      item). This is the genuinely slow Drive/Sheets round trip that
-  //      was the real cause of "it loads a while until trucks shown."
-  //      loadFullRoutePlan_ runs this in the background, in parallel with
-  //      phase 1, and the login button handler (wireLoginScreen, below)
-  //      awaits manifestReadyPromise_ if the driver enters a valid PIN
-  //      before phase 2 has finished.
-  // The offline route-plan cache (localStorage) still exists, but its job
-  // narrows to: (a) a fallback for phase 1 itself if get_trucks can't be
-  // reached at all (shown with a clear "offline"/stale-data toast, never
-  // silently), and (b) phase 2's offline fallback so the app still works
-  // through a dead zone after loading once this morning with signal.
+  //      item) — a bigger file, not a slower one. loadFullRoutePlan_ runs
+  //      this in the background, in parallel with phase 1, and the login
+  //      button handler (wireLoginScreen, below) awaits
+  //      manifestReadyPromise_ if the driver enters a valid PIN before
+  //      phase 2 has finished.
+  // The offline route-plan cache (localStorage) still exists as a fallback
+  // for both phases if the corresponding fetch can't be reached at all
+  // (shown with a clear "offline"/stale-data toast, never silently), so
+  // the app still works through a dead zone after loading once this
+  // morning with signal.
   const cachedPlan = loadRoutePlanCache_();
 
   manifestReadyPromise_ = loadFullRoutePlan_(cachedPlan);
+  // As soon as the fast static load above settles (success OR falling back
+  // to cache — refreshRoutePlanLive_ itself no-ops if manifest never ended
+  // up set at all), kick ONE live ERP-outFuture check in the background —
+  // per G's "if there is good connection etc it reads the live data again
+  // but without slowing the app down": this is what actually applies any
+  // live truck/time/rack correction, but it happens AFTER the driver
+  // already has a usable screen, never before, and a slow/failed check
+  // here never blocks or delays anything (see refreshRoutePlanLive_'s own
+  // silent-on-failure handling). The existing periodic timer below then
+  // keeps checking every 5 minutes for the rest of the shift.
+  manifestReadyPromise_.then(() => refreshRoutePlanLive_());
 
   // Also start warming the items catalog (used by "+ Add Item" on the stop
   // screen) right away, in the background, alongside the route plan fetch —
@@ -972,24 +990,41 @@ function wireStopScreen() {
 }
 
 // ==================================================================
-// LIVE ROUTE-PLAN REFRESH (2026-09-29) — per G's "Times / truck order /
-// rack number could be changed - should be displayed on the app... make it
-// somehow so that when changes made here it updates in the app - for
-// example delivery times get changed after prep already done etc - changes
-// should still arrive - item data still ok to get from the erp and it
-// doesnt change after thats ok but the truck and delivery data should be
-// based on the live erp export." Code.gs now re-reads ERP-outFuture LIVE on
-// every ?action=get_route_plan/get_trucks fetch instead of just serving
-// whatever "Create Route Plan..." last published (see buildLiveRouteStops_
-// in Code.gs for the backend half and exactly which fields are live vs
-// static) — this is the frontend half: a periodic background re-fetch that
-// merges the fresh truck/time/rack/address/$-total fields onto the stops
-// already in memory, WITHOUT resetting anything the driver is mid-way
-// through (flaggedItems, countedItems, addedItems, a typed racks count, a
-// drawn signature, search/filter state) and WITHOUT losing an
+// LIVE ROUTE-PLAN REFRESH (2026-09-29, revised 2026-09-30) — per G's
+// "Times / truck order / rack number could be changed - should be
+// displayed on the app... make it somehow so that when changes made here
+// it updates in the app - for example delivery times get changed after
+// prep already done etc - changes should still arrive - item data still ok
+// to get from the erp and it doesnt change after thats ok but the truck
+// and delivery data should be based on the live erp export." Code.gs
+// re-reads ERP-outFuture LIVE and rebuilds truck/driver/time/rack/address/
+// $-total data off it (see buildLiveRouteStops_ in Code.gs for the backend
+// half and exactly which fields are live vs static) — this is the frontend
+// half: a periodic background re-fetch that merges those fresh fields onto
+// the stops already in memory, WITHOUT resetting anything the driver is
+// mid-way through (flaggedItems, countedItems, addedItems, a typed racks
+// count, a drawn signature, search/filter state) and WITHOUT losing an
 // already-submitted stop's local driver_state even if it's momentarily
 // missing from a later live fetch (see refreshRoutePlanLive_'s own merge-
 // policy comment below).
+//
+// REVISED 2026-09-30, per G's "it should not be pulled fresh on every
+// request! the app still should work offline - this should be more of a
+// thing if there is good connection etc it reads the live data again but
+// without slowing the app down": from 2026-09-29 to today, this same live
+// ERP-outFuture rebuild ALSO ran inline on the app's main, blocking
+// get_trucks/get_route_plan load — meaning the app's core "show me my
+// route" path depended on a live Sheets read succeeding (and being fast),
+// working against the offline-first design described at the top of this
+// file. That's gone: get_trucks/get_route_plan are pure static file reads
+// again (see loadFullRoutePlan_/init() above), and THIS function —
+// refreshRoutePlanLive_, hitting its own ?action=get_live_route_updates
+// endpoint — is now the ONLY place the live rebuild ever runs. It's called
+// once in the background right after the initial load settles (see init(),
+// a couple screens up) and then on the timer below — always after the
+// driver already has a usable screen, never gating it, and silently
+// no-opping on any failure (offline, a slow connection, a backend hiccup)
+// rather than surfacing that as a problem.
 // ==================================================================
 const ROUTE_PLAN_LIVE_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 min — ERP-outFuture itself only refreshes every 30 min, 6am-3pm (see its own title-row banner / the ROUTE PLAN section comment in Code.gs), so this is already well ahead of that; going faster buys nothing
 
@@ -1047,7 +1082,15 @@ async function refreshRoutePlanLive_() {
   if (!manifest) return; // nothing loaded yet (still mid-login) — nothing to refresh
   let json;
   try {
-    const res = await fetch(APPS_SCRIPT_URL + "?action=get_route_plan", { cache: "no-store" });
+    // ?action=get_live_route_updates, NOT get_route_plan (2026-09-30) — the
+    // main route-plan fetch (used by loadFullRoutePlan_ above) is back to a
+    // fast, pure static file read (see getRoutePlanForRequest_'s own "PURE
+    // STATIC AGAIN" comment in Code.gs). This function is now the ONLY
+    // place that ever triggers the slower live ERP-outFuture rebuild — and
+    // it already runs in the background, non-blocking, failing silently on
+    // no connection — exactly the "if there is good connection... without
+    // slowing the app down" behavior G asked for.
+    const res = await fetch(APPS_SCRIPT_URL + "?action=get_live_route_updates", { cache: "no-store" });
     json = await res.json();
   } catch (err) {
     console.warn("live route-plan refresh failed (network) — keeping what's already loaded", err);
@@ -1225,6 +1268,7 @@ function openStopScreen_(stop) {
     clearSignaturePad_();
     clearRackPhoto_();
     clearSkipReason_();
+    clearExtraInvoiceEmail_();
   }
 
   // Header/meta/notes/expected-racks-label — split into its own function
@@ -2081,38 +2125,43 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
   // function, not DOM insertion order (that's set by the appendChild calls
   // further down, reasonRow first).
   //
-  // A row of direct pill buttons now, not a <select> — per G's "where i
-  // click item rejected make so the currently optional dropdown is popping
-  // up directly and i have to choose the reason why rejected." Same
-  // reasoning as the top-level reason-btn-row just below (see its own CSS
-  // comment: "no dropdown to open on a tablet, and the current pick is
-  // visible without tapping in") — this sub-reason picker just never got the
-  // same treatment when that one was built. No longer optional either: it
-  // used to say "(optional)" and could be left blank; now findMissingRejectReason_
+  // A real native <select> now — per G's 2026-10-02 "make so i click and
+  // basically in the button or so is opening a dropdown... its basically
+  // just 3 different rejection options," explicitly asked for on THIS field
+  // only ("number 2 but only on the rejected button"), overriding the
+  // general pill-buttons-not-a-select rule the rest of this app still
+  // follows (see .reason-btn-row's own CSS comment) — this one field went
+  // dropdown -> required pill row -> back to dropdown as G's own thinking on
+  // it evolved; each change is a real, explicit ask, not a reversal to
+  // second-guess. Still required, not optional: findMissingRejectReason_
   // (called from the Next: Signature button in wireStopScreen) blocks moving
-  // on until a Rejected line has one of these picked.
+  // on until a Rejected line has one of these picked, same as before.
   const rejectDetailRow = document.createElement("div");
   rejectDetailRow.className = "reject-detail-row" + (ex.reason === "Rejected" ? "" : " hidden");
   const rejectDetailLabel = document.createElement("div");
   rejectDetailLabel.className = "reject-detail-label";
   rejectDetailLabel.textContent = "Why rejected?";
   rejectDetailRow.appendChild(rejectDetailLabel);
-  const rejectDetailBtnRow = document.createElement("div");
-  rejectDetailBtnRow.className = "reject-detail-btn-row";
+  const rejectDetailSelect = document.createElement("select");
+  rejectDetailSelect.className = "reject-detail-select";
+  const placeholderOpt = document.createElement("option");
+  placeholderOpt.value = "";
+  placeholderOpt.textContent = "Select a reason…";
+  rejectDetailSelect.appendChild(placeholderOpt);
   REJECT_DETAIL_OPTIONS.forEach((opt) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "reject-detail-btn" + (ex.reject_detail === opt ? " selected" : "");
-    btn.textContent = opt;
-    btn.addEventListener("click", () => {
-      ex.reject_detail = opt;
-      rejectDetailBtnRow.querySelectorAll(".reject-detail-btn").forEach((b) => b.classList.remove("selected"));
-      btn.classList.add("selected");
-      updateItemPickStatus_(statusEl, ex, true);
-    });
-    rejectDetailBtnRow.appendChild(btn);
+    const optionEl = document.createElement("option");
+    optionEl.value = opt;
+    optionEl.textContent = opt;
+    rejectDetailSelect.appendChild(optionEl);
   });
-  rejectDetailRow.appendChild(rejectDetailBtnRow);
+  rejectDetailSelect.value = ex.reject_detail || "";
+  rejectDetailSelect.classList.toggle("placeholder", !rejectDetailSelect.value);
+  rejectDetailSelect.addEventListener("change", () => {
+    ex.reject_detail = rejectDetailSelect.value;
+    rejectDetailSelect.classList.toggle("placeholder", !rejectDetailSelect.value);
+    updateItemPickStatus_(statusEl, ex, true);
+  });
+  rejectDetailRow.appendChild(rejectDetailSelect);
 
   const reasonRow = document.createElement("div");
   reasonRow.className = "reason-btn-row";
@@ -2133,7 +2182,8 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
         rejectDetailRow.classList.remove("hidden");
       } else {
         ex.reject_detail = "";
-        rejectDetailBtnRow.querySelectorAll(".reject-detail-btn").forEach((b) => b.classList.remove("selected"));
+        rejectDetailSelect.value = "";
+        rejectDetailSelect.classList.add("placeholder");
         rejectDetailRow.classList.add("hidden");
       }
       updateItemPickStatus_(statusEl, ex, true);
@@ -2256,11 +2306,97 @@ function wireSignatureScreen() {
   document.getElementById("print-pdf-btn-signature").addEventListener("click", printInvoice_);
 }
 
+// Per G's "on signature page or just prior - display a recap of all
+// discrepancies for the customer to see. also display total units and
+// dollars being dropped off." Called fresh every time the signature screen
+// opens (openSignatureScreen_) — everything it reads (flaggedItems/
+// addedItems/line-item qty+price) is already final by then, and nothing on
+// this screen itself (signature, rack photo) can change it, so there's no
+// need to re-render it live while the driver is on this page.
+//
+// "Units/dollars being dropped off" is deliberately a DIFFERENT number from
+// the invoiced Total shown elsewhere (getStopTotal_/payloadTotal in
+// buildStopPdfPayload_) — that figure stays at the original invoiced amount
+// on purpose, since GrowFlo issues a corrected invoice separately for any
+// rejection/short/damage (see the exceptionsNote in Code.gs's
+// sendDeliveryEmail_). This is the actual physical qty/value left at this
+// stop today: ordered qty minus whatever was flagged, plus whatever was
+// added — so a driver/customer sanity-check figure, not a billing one.
+function renderDeliveryRecap_(stop) {
+  const totalsEl = document.getElementById("recap-totals");
+  const discEl = document.getElementById("recap-discrepancies");
+  if (!totalsEl || !discEl) return;
+
+  const lineItems = getLineItems_(stop);
+  let totalUnits = 0;
+  let totalDollars = 0;
+  let hasUnpriced = false;
+  const discrepancyLines = [];
+
+  lineItems.forEach((li, idx) => {
+    const orderedQty = Number(li.qty) || 0;
+    const ex = flaggedItems[idx];
+    let deliveredQty = orderedQty;
+    if (ex) {
+      const qtyChange = Number(ex.qty_change) || 0;
+      deliveredQty = Math.max(0, orderedQty - qtyChange);
+      discrepancyLines.push({
+        label: li.item_name + (li.size ? " (" + li.size + ")" : ""),
+        reason: exceptionReasonText_(ex),
+        qtyChange: qtyChange,
+        notes: ex.notes || "",
+      });
+    }
+    totalUnits += deliveredQty;
+    if (deliveredQty > 0) {
+      if (li.unit_price != null) totalDollars += Number(li.unit_price) * deliveredQty;
+      else hasUnpriced = true;
+    }
+  });
+
+  Object.values(addedItems).forEach((it) => {
+    let qty = Number(it.qty);
+    if (!isFinite(qty) || qty < 1) qty = 1;
+    totalUnits += qty;
+    if (it.unit_price != null) totalDollars += Number(it.unit_price) * qty;
+    else hasUnpriced = true;
+    discrepancyLines.push({
+      label: (it.item_name || it.common_name || "Added item") + (it.size ? " (" + it.size + ")" : ""),
+      reason: "Added",
+      qtyChange: qty,
+      notes: it.notes || "",
+      isAdded: true,
+    });
+  });
+
+  totalsEl.textContent =
+    totalUnits + " unit" + (totalUnits === 1 ? "" : "s") + " · $" + totalDollars.toFixed(2) + " being dropped off today" +
+    (hasUnpriced ? " (some items have no price on file, not included in that dollar figure)" : "");
+
+  discEl.innerHTML = "";
+  if (discrepancyLines.length === 0) {
+    const none = document.createElement("div");
+    none.className = "recap-none";
+    none.textContent = "No discrepancies — delivered exactly as ordered.";
+    discEl.appendChild(none);
+    return;
+  }
+  discrepancyLines.forEach((d) => {
+    const row = document.createElement("div");
+    row.className = "recap-disc-row" + (d.isAdded ? " recap-disc-added" : "");
+    const qtySign = d.isAdded ? "+" : "-";
+    row.textContent = qtySign + d.qtyChange + " " + d.label + " — " + d.reason + (d.notes ? " (" + d.notes + ")" : "");
+    discEl.appendChild(row);
+  });
+}
+
 function openSignatureScreen_(stop) {
   isSubmitting = false;
   document.getElementById("submit-btn").disabled = false;
   document.getElementById("skip-sig-btn").disabled = false;
   document.getElementById("signature-stop-name").textContent = stop.customer_name;
+
+  renderDeliveryRecap_(stop);
 
   // The "Print Invoice" row is always visible now — printInvoice_
   // itself decides whether to open the already-synced PDF or generate an
@@ -2379,6 +2515,23 @@ function clearSkipReason_() {
   if (select) select.value = "";
 }
 
+// Per G's "on submit page add option for driver to type in a different
+// email to send the final invoice to" — reset the same way the skip-reason
+// select/signature pad/rack photo are, on a genuinely new stop only (see
+// openStopScreen_), never on a same-stop back-and-forth.
+function clearExtraInvoiceEmail_() {
+  const input = document.getElementById("extra-invoice-email-input");
+  if (input) input.value = "";
+}
+
+// Loose but real email-shape check — enough to catch an obvious typo (a
+// missing "@" or "." , a stray space) before it's queued for a background
+// send with no way for the driver to notice or fix it later. Not a strict
+// RFC validator; nothing here needs that level of rigor.
+function isPlausibleEmail_(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
 function renderRackPhotoPreview_() {
   const img = document.getElementById("rack-photo-preview");
   const takeBtn = document.getElementById("take-photo-btn");
@@ -2451,6 +2604,18 @@ async function submitStop_(wantsSignature) {
     return;
   }
 
+  // Per G's "add option for driver to type in a different email to send
+  // the final invoice to" — validated here, before anything is queued, so a
+  // typo doesn't quietly fail later inside the background send with no way
+  // for the driver to notice (see buildStopPdfPayload_/isPlausibleEmail_
+  // and sendDeliveryEmail_ in Code.gs for where this actually gets used).
+  const extraEmailInput = document.getElementById("extra-invoice-email-input");
+  const extraInvoiceEmail = extraEmailInput ? extraEmailInput.value.trim() : "";
+  if (extraInvoiceEmail && !isPlausibleEmail_(extraInvoiceEmail)) {
+    showToast("That extra invoice email doesn't look valid — fix it or clear the field before submitting.");
+    return;
+  }
+
   isSubmitting = true;
   document.getElementById("submit-btn").disabled = true;
   document.getElementById("skip-sig-btn").disabled = true;
@@ -2513,6 +2678,7 @@ async function submitStop_(wantsSignature) {
   addItemPanelOpen_ = false;
   addItemSearchText_ = "";
   rackPhotoDataUrl = null;
+  clearExtraInvoiceEmail_();
   renderRouteList_();
   showScreen_("screen-route");
 }
@@ -2621,6 +2787,12 @@ function buildStopPdfPayload_(actionName, hasSignatureOverride) {
   const signatureImage = hasSignature ? document.getElementById("sig-pad").toDataURL("image/png") : null;
   const skipReasonSelect = document.getElementById("skip-sig-reason-select");
   const skipReason = skipReasonSelect ? skipReasonSelect.value : "";
+  // Per G's "add option for driver to type in a different email to send the
+  // final invoice to" — only meaningful for a real submit (handleSubmitStop_
+  // passes it to sendDeliveryEmail_); handlePreviewPdf_ just ignores the
+  // field, same as it already ignores anything else it doesn't need.
+  const extraEmailInput = document.getElementById("extra-invoice-email-input");
+  const extraInvoiceEmail = extraEmailInput ? extraEmailInput.value.trim() : "";
 
   const racksUnloaded = currentStop._racksUnloadedEntered;
   const exceptions = Object.values(flaggedItems).map((ex) => {
@@ -2720,6 +2892,7 @@ function buildStopPdfPayload_(actionName, hasSignatureOverride) {
     signature_skipped_reason: hasSignature ? "" : skipReason,
     rack_photo_image: rackPhotoDataUrl,
     contact_emails: currentStop.contact_emails || [],
+    extra_invoice_email: extraInvoiceEmail,
     submitted_at_iso: new Date().toISOString(),
   };
 }
