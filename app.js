@@ -87,7 +87,7 @@ let manifestReadyPromise_ = null; // set once in init() to loadFullRoutePlan_()'
 let selectedTruck = null;   // truck chosen on login screen, before PIN is confirmed
 let currentTruck = null;    // truck the driver is logged into
 let truckDriverNames_ = {}; // {"Truck 4": "Jeremy"} — from the same get_trucks payload as the login screen's truck buttons; kept around for the route screen's greeting
-let truckStartTimes_ = {};  // {"Truck 4": "6:00 AM"} — same deal, for the route screen's "plan is to leave at" line
+let truckStartTimes_ = {};  // {"Truck 4": "6:00 AM"} — same deal; this is the ERP's CLOCK-IN time, not a leave time — see plannedLeaveTimeStr_ for the +30-minute adjustment applied before it's ever shown or logged
 let routeStarted_ = false;  // true once "Start Driving" has actually logged a Route Start row this login — reset on each fresh login (see wireLoginScreen). Kept idempotent so re-rendering the route screen never double-logs a start.
 let routeEnded_ = false;    // true once "End Route" has actually logged a Route End row this login — reset on each fresh login, same as routeStarted_. See endRoute_.
 let routeStartedAtLocal_ = null; // Date the driver tapped Start Driving, this login — for the on-screen "Route started at ..." line only (the actual logged timestamp lives on the backend). See startRoute_/updateRouteStatusBox_.
@@ -548,7 +548,13 @@ function updateRouteStatusBox_() {
   document.getElementById("route-stop-count").textContent =
     "You have " + stopCount + (stopCount === 1 ? " stop" : " stops") + " today.";
 
-  const leaveTime = truckStartTimes_[currentTruck];
+  // truckStartTimes_ holds the ERP clock-in time, not the leave time — see
+  // plannedLeaveTimeStr_'s own comment. Falls back to the raw clock-in value
+  // if it's ever in some other shape this app hasn't seen (so the driver
+  // still gets SOME time rather than the "no planned time" message when one
+  // genuinely was published, just without the +30 buffer applied that once).
+  const clockInTime = truckStartTimes_[currentTruck];
+  const leaveTime = clockInTime ? plannedLeaveTimeStr_(clockInTime) || clockInTime : null;
   document.getElementById("route-leave-time").textContent = leaveTime
     ? "The plan is to leave at " + leaveTime + "."
     : "No planned leave time set for " + currentTruck + " today.";
@@ -601,6 +607,35 @@ function formatClockPacific_(date) {
   }).format(date);
 }
 
+// truckStartTimes_ (ERP-outFuture's "start time" column) is the driver's
+// CLOCK-IN time, not their leave time — per G's feedback on the "The plan is
+// to leave at 5:00am" text: "This is based on the time that I select on the
+// ERP as the start time. This is NOT the time the driver leaves, but the
+// time they clock in to work. I give them about 30 minutes to load their
+// truck and leave, so if their start time was set to 5:00am, their leave
+// time should be 5:30am." G still wants the app telling the driver an actual
+// leave time ("I like that it tells the driver what time they should be
+// leaving") — just the ERP's raw clock-in value plus this fixed buffer, not
+// the clock-in value verbatim. Parses/reformats the same "H:MM AM/PM" shape
+// Code.gs's own parseDeliveryTimeToMinutes_/formatMinutesToTimeStr_ use for
+// this same string (kept duplicated here, not shared, since this is a
+// frontend-only file with no import of Code.gs) — a value that isn't the
+// expected 12-hour-clock shape returns null rather than guessing.
+const LEAVE_TIME_BUFFER_MINUTES_ = 30;
+function plannedLeaveTimeStr_(clockInTimeStr) {
+  const m = String(clockInTimeStr || "").trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return null;
+  let hour = parseInt(m[1], 10) % 12;
+  if (m[3].toUpperCase() === "PM") hour += 12;
+  const totalMinutes = (hour * 60 + parseInt(m[2], 10) + LEAVE_TIME_BUFFER_MINUTES_ + 1440) % 1440;
+  const outHour24 = Math.floor(totalMinutes / 60);
+  const outMinute = totalMinutes % 60;
+  const ampm = outHour24 >= 12 ? "PM" : "AM";
+  let displayHour = outHour24 % 12;
+  if (displayHour === 0) displayHour = 12;
+  return displayHour + ":" + String(outMinute).padStart(2, "0") + " " + ampm;
+}
+
 // Logs the actual route-start time to the Route Timing sheet (best-effort,
 // via the same offline queue as stop submits — see OFFLINE QUEUE below).
 // Doesn't wait on the network: the driver tapping "Start Driving" should
@@ -618,7 +653,11 @@ function startRoute_() {
     truck: currentTruck,
     driver_name: driverName,
     stop_count: stopCount,
-    planned_leave_time: truckStartTimes_[currentTruck] || "", // for the backend's planned-vs-actual diff (Route Timing sheet)
+    // Same +30-minute leave-time adjustment as the on-screen "plan is to
+    // leave at" text (see plannedLeaveTimeStr_) — so the Route Timing
+    // sheet's planned-vs-actual diff office sees is measured against the
+    // real intended leave time, not the ERP's raw clock-in time.
+    planned_leave_time: (truckStartTimes_[currentTruck] && plannedLeaveTimeStr_(truckStartTimes_[currentTruck])) || truckStartTimes_[currentTruck] || "",
     started_at_iso: routeStartedAtLocal_.toISOString(),
   };
   queueOffline_(payload);
@@ -2125,36 +2164,65 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
   // rejected button but then i actually choose from dropdown!" The first
   // 2026-10-02 pass still had a separate "Why rejected?" dropdown below a
   // plain "Rejected" button, which wasn't what was asked for — this
-  // collapses the two into ONE control: a <select> shaped like the other
-  // two reason pills, reading "Rejected" in its closed state until a
-  // specific reason is picked, then showing that reason directly. Tapping
-  // ANY of its options (including the bare "Rejected" placeholder) sets
-  // ex.reason to "Rejected" in the same action; picking one of the 3 real
-  // options also sets ex.reject_detail. Missing/Shipping Damage stay plain
-  // buttons, unchanged — this is scoped to Rejected only, per G's "number 2
-  // but only on the rejected button." Still required, not optional:
-  // findMissingRejectReason_ (called from the Next: Signature button in
-  // wireStopScreen) blocks moving on until a Rejected line has picked one
-  // of the 3 real options, not just left on the bare "Rejected" placeholder.
+  // collapses the two into ONE control, reading "Rejected" in its closed
+  // state until a specific reason is picked, then showing that reason
+  // directly. Tapping ANY of its options (including the bare "Rejected"
+  // placeholder) sets ex.reason to "Rejected" in the same action; picking
+  // one of the 3 real options also sets ex.reject_detail. Missing/Shipping
+  // Damage stay plain buttons, unchanged — this is scoped to Rejected only,
+  // per G's "number 2 but only on the rejected button." Still required, not
+  // optional: findMissingRejectReason_ (called from the Next: Signature
+  // button in wireStopScreen) blocks moving on until a Rejected line has
+  // picked one of the 3 real options, not just left on the bare "Rejected"
+  // placeholder.
+  //
+  // 2026-10-06 correction: this was first built as a plain styled <select>
+  // (appearance:none + a CSS background-image caret) — worked fine in the
+  // desktop Playwright tests, but on a real Android tablet it rendered as a
+  // solid red pill with the OS's own native dropdown-arrow texture tiled
+  // repeatedly across the whole width, fighting with the "Rejected" text
+  // (an Android WebView/Chrome quirk where the native select chrome isn't
+  // fully suppressed by appearance:none, so our custom background painted
+  // underneath/behind it instead of replacing it). Fixed with the standard
+  // "real select, fake visible button" pattern instead of fighting
+  // appearance any further: the actual <select> (`rejectedSelectInput`) is
+  // stretched to cover the whole pill but made fully invisible
+  // (opacity: 0 in CSS) — it still receives every tap/click and still opens
+  // the device's real native picker, so none of the existing value/
+  // mousedown/change logic below had to change — while a separate plain
+  // `<span>` (`rejectedLabel`, pointer-events: none so taps pass straight
+  // through to the select beneath it) is the only thing actually painted,
+  // showing "Rejected" or the picked sub-reason in plain text with one
+  // small CSS-drawn triangle caret (`.reason-select-rejected-label::after`
+  // in style.css) — nothing native-drawn is visible at all anymore, so
+  // there's no OS chrome left to fight on any device.
   const otherReasonButtons = [];
 
   function syncRejectedSelectClass_() {
-    rejectedSelect.className = "reason-btn reason-select-rejected" + (ex.reason === "Rejected" ? " selected" : "");
+    rejectedWrap.className = "reason-btn reason-select-rejected" + (ex.reason === "Rejected" ? " selected" : "");
+  }
+  function syncRejectedLabelText_() {
+    rejectedLabel.textContent = rejectedSelectInput.options[rejectedSelectInput.selectedIndex].textContent;
   }
 
-  const rejectedSelect = document.createElement("select");
+  const rejectedWrap = document.createElement("div");
+  const rejectedLabel = document.createElement("span");
+  rejectedLabel.className = "reason-select-rejected-label";
+  const rejectedSelectInput = document.createElement("select");
+  rejectedSelectInput.className = "reason-select-rejected-input";
   const rejectedPlaceholderOpt = document.createElement("option");
   rejectedPlaceholderOpt.value = "";
   rejectedPlaceholderOpt.textContent = "Rejected";
-  rejectedSelect.appendChild(rejectedPlaceholderOpt);
+  rejectedSelectInput.appendChild(rejectedPlaceholderOpt);
   REJECT_DETAIL_OPTIONS.forEach((opt) => {
     const optionEl = document.createElement("option");
     optionEl.value = opt;
     optionEl.textContent = opt;
-    rejectedSelect.appendChild(optionEl);
+    rejectedSelectInput.appendChild(optionEl);
   });
-  rejectedSelect.value = ex.reason === "Rejected" ? (ex.reject_detail || "") : "";
+  rejectedSelectInput.value = ex.reason === "Rejected" ? (ex.reject_detail || "") : "";
   syncRejectedSelectClass_();
+  syncRejectedLabelText_();
   // "change" alone isn't enough: if the line is currently Missing/Shipping
   // Damage (so the select sits on its blank "Rejected" placeholder, value
   // ""), and the driver reopens the dropdown and taps that SAME placeholder
@@ -2168,26 +2236,30 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
   // handled separately below by "change" once a specific reason is picked.
   // Guarded to no-op while already on Rejected, so reopening the dropdown to
   // change an existing pick doesn't wipe out reject_detail first.
-  rejectedSelect.addEventListener("mousedown", () => {
+  rejectedSelectInput.addEventListener("mousedown", () => {
     if (ex.reason === "Rejected") return;
     ex.reason = "Rejected";
     ex.reject_detail = "";
-    rejectedSelect.value = "";
+    rejectedSelectInput.value = "";
     syncRejectedSelectClass_();
+    syncRejectedLabelText_();
     otherReasonButtons.forEach((b) => b.classList.remove("selected"));
     updateItemPickStatus_(statusEl, ex, true);
   });
-  rejectedSelect.addEventListener("change", () => {
+  rejectedSelectInput.addEventListener("change", () => {
     ex.reason = "Rejected";
-    ex.reject_detail = rejectedSelect.value;
+    ex.reject_detail = rejectedSelectInput.value;
     syncRejectedSelectClass_();
+    syncRejectedLabelText_();
     otherReasonButtons.forEach((b) => b.classList.remove("selected"));
     updateItemPickStatus_(statusEl, ex, true);
   });
+  rejectedWrap.appendChild(rejectedLabel);
+  rejectedWrap.appendChild(rejectedSelectInput);
 
   const reasonRow = document.createElement("div");
   reasonRow.className = "reason-btn-row";
-  reasonRow.appendChild(rejectedSelect);
+  reasonRow.appendChild(rejectedWrap);
   ["Missing", "Shipping Damage"].forEach((r) => {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -2200,8 +2272,9 @@ function buildExceptionInlineForm_(ex, idx, stop, statusEl) {
       // stale "Pests" silently attached to a "Missing" flag) and resets the
       // Rejected select back to its bare placeholder.
       ex.reject_detail = "";
-      rejectedSelect.value = "";
+      rejectedSelectInput.value = "";
       syncRejectedSelectClass_();
+      syncRejectedLabelText_();
       otherReasonButtons.forEach((b) => b.classList.remove("selected"));
       btn.classList.add("selected");
       updateItemPickStatus_(statusEl, ex, true);

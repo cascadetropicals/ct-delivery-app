@@ -369,32 +369,59 @@ button.secondary {
    then "make so the currently optional dropdown is popping up directly and
    i have to choose the reason why rejected," then (2026-10-02) "make so i
    click and basically in the button or so is opening a dropdown... its
-   basically just 3 different rejection options," and finally, same day,
-   the correction that mattered: "the why rejected dropdown should be in the
-   rejected button - so i click the rejected button but then i actually
-   choose from dropdown!" — i.e. ONE control, not a "Rejected" button plus a
-   separate dropdown below it. buildExceptionInlineForm_ (app.js) builds this
-   as a real <select> carrying className "reason-btn reason-select-rejected"
-   (plus "selected" when active) so .reason-btn above already gives it the
-   exact same pill border/fill/selected-state flip as the Missing/Shipping
-   Damage buttons next to it — this class only resets the native select
-   chrome and adds a caret so it still reads as "tap me to open a dropdown."
-   The closed box shows "Rejected" until a real reason is picked, then shows
-   that reason directly — no separate "selected" look needed beyond what
-   .reason-btn.selected already does. */
-.reason-select-rejected {
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  text-align-last: center;
-  padding-right: 34px;
-  background-repeat: no-repeat;
-  background-position: right 14px center;
-  background-size: 14px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b3261e' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+   basically just 3 different rejection options," and the correction that
+   mattered, same day: "the why rejected dropdown should be in the rejected
+   button - so i click the rejected button but then i actually choose from
+   dropdown!" — i.e. ONE control, not a "Rejected" button plus a separate
+   dropdown below it.
+   2026-10-06 correction: the first version styled the real <select> itself
+   with appearance:none + a background-image caret — on a real Android
+   tablet this rendered as a solid red pill with the OS's own native
+   dropdown-arrow texture tiled repeatedly across the width, fighting the
+   "Rejected" text (appearance:none isn't fully honored for <select> by
+   every Android WebView/Chrome build). Fixed with the standard "real
+   select, fake visible button" split instead: buildExceptionInlineForm_
+   (app.js) now builds a wrapper DIV carrying className "reason-btn
+   reason-select-rejected" (plus "selected" when active, same as any other
+   .reason-btn) holding two children — a plain, fully native-chrome-free
+   `.reason-select-rejected-label` SPAN that's the only thing actually
+   painted (its own ::after below draws one small CSS triangle caret, no
+   image/native arrow involved at all), and the real
+   `.reason-select-rejected-input` SELECT stretched over the whole pill but
+   made fully invisible — it still receives every tap and still opens the
+   device's real native picker, opacity alone doesn't block interaction,
+   there's just nothing native left to see. */
+.reason-select-rejected { position: relative; }
+.reason-select-rejected-label {
+  display: block;
+  width: 100%;
+  padding-right: 22px; /* room for the ::after caret below */
+  pointer-events: none; /* taps pass straight through to the real select on top */
+  position: relative;
 }
-.reason-select-rejected.selected {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+.reason-select-rejected-label::after {
+  content: "";
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  margin-top: -3px;
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid currentColor; /* inherits the pill's own red/white text color — no separate color to keep in sync */
+}
+.reason-select-rejected-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  opacity: 0; /* invisible, not inert — still tappable, still opens the real native picker */
+  cursor: pointer;
 }
 
 .qty-affected-label { display: block; font-size: 13px; color: #7a3630; margin-top: 16px; }
