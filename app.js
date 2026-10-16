@@ -3026,6 +3026,12 @@ function buildStopPdfPayload_(actionName, hasSignatureOverride) {
     })),
     subtotal: payloadSubtotal,
     delivery_fee: getStopDeliveryFee_(currentStop),
+    // From the GrowFlo pack (static per stop) — lets the delivery PDF print
+    // Sub Total / Tax / Discount like the invoice so the lines reconcile.
+    discount_total: currentStop.discount_total || 0,
+    retail_fee_total: currentStop.retail_fee_total || 0,
+    tax_total: currentStop.tax_total || 0,
+    other_charges_total: currentStop.other_charges_total || 0,
     total: payloadTotal,
     exceptions: exceptions,
     added_items: addedItemsPayload,
