@@ -1308,6 +1308,54 @@ function openStopScreen_(stop) {
     clearRackPhoto_();
     clearSkipReason_();
     clearExtraInvoiceEmail_();
+
+    // A stop that was already submitted: put its removed/rejected/missing
+    // items and added items back exactly as they were submitted, so the
+    // reopened delivery (and its recap) shows the same edits instead of
+    // looking like "delivered exactly as ordered".
+    const savedState = stop.driver_state;
+    if (savedState && savedState.status) {
+      const savedLines = getLineItems_(stop);
+      (savedState.exceptions || []).forEach((ex) => {
+        const exCode = String(ex.item_code || "").trim().toLowerCase();
+        const exNameKey = String(ex.item_name || "").trim().toLowerCase() + "|" + String(ex.size || "").trim().toLowerCase();
+        const lineIdx = savedLines.findIndex((li) => {
+          const liCode = String(li.item_code || "").trim().toLowerCase();
+          const liNameKey = String(li.item_name || "").trim().toLowerCase() + "|" + String(li.size || "").trim().toLowerCase();
+          return (exCode && liCode === exCode) || liNameKey === exNameKey;
+        });
+        if (lineIdx < 0) return;
+        let reason = ex.reason || "Rejected";
+        let rejectDetail = "";
+        if (reason.indexOf("Rejected - ") === 0) {
+          rejectDetail = reason.slice("Rejected - ".length);
+          reason = "Rejected";
+        }
+        flaggedItems[lineIdx] = {
+          item_code: savedLines[lineIdx].item_code || "",
+          item_name: savedLines[lineIdx].item_name,
+          size: savedLines[lineIdx].size || "",
+          qty: savedLines[lineIdx].qty,
+          reason: reason,
+          reject_detail: rejectDetail,
+          qty_change: Number(ex.qty_change) || 0,
+          notes: ex.notes || "",
+          expanded: false,
+        };
+      });
+      (savedState.added_items || []).forEach((it) => {
+        addedItems["a" + (addedItemIdCounter_++)] = {
+          item_code: it.item_code || "",
+          item_name: it.item_name || "",
+          common_name: it.common_name || "",
+          size: it.size || "",
+          unit_price: it.unit_price != null ? it.unit_price : null,
+          qty: Number(it.qty) || 1,
+          notes: it.notes || "",
+          expanded: false,
+        };
+      });
+    }
   }
 
   // Header/meta/notes/expected-racks-label — split into its own function
