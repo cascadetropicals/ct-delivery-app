@@ -2854,7 +2854,19 @@ async function printInvoice_() {
   // itself (same as this always has).
   const fileId = currentStop.driver_state && currentStop.driver_state.pdf_file_id;
   if (fileId) {
-    window.open(APPS_SCRIPT_URL + "?action=get_pdf&file_id=" + encodeURIComponent(fileId), "_blank");
+    // Open the tab right now (inside the tap) so iPad Safari doesn't block it,
+    // then point it at the PDF once the backend has sent it.
+    const pdfWin = window.open("", "_blank");
+    const saved = await fetchPdfBlob_(null, APPS_SCRIPT_URL + "?action=get_pdf&file_id=" + encodeURIComponent(fileId));
+    if (!saved.blob) {
+      if (pdfWin) pdfWin.close();
+      showToast(saved.offline
+        ? "Couldn't reach the server to open the saved invoice — check your connection and try again."
+        : (saved.error || "Couldn't open the saved invoice."));
+      return;
+    }
+    const savedUrl = URL.createObjectURL(saved.blob);
+    if (pdfWin) { pdfWin.location.href = savedUrl; } else { window.location.href = savedUrl; }
     return;
   }
 
@@ -2865,6 +2877,7 @@ async function printInvoice_() {
   const originalLabel = printBtn.textContent;
   printBtn.disabled = true;
   printBtn.textContent = "Generating…";
+  const previewWin = window.open("", "_blank");
   try {
     const result = await fetchPdfBlob_(payload);
     if (!result.blob) {
@@ -2893,6 +2906,7 @@ async function printInvoice_() {
           ? "Couldn't reach the server to generate the invoice — check your connection and try again. (A not-yet-submitted stop's invoice preview needs a connection to generate; an already-submitted stop's saved invoice doesn't.)"
           : (result.error || "Couldn't generate the invoice.")
       );
+      if (previewWin) previewWin.close();
       return;
     }
     // Not revoking the object URL after opening — the new tab needs it to
@@ -2901,9 +2915,10 @@ async function printInvoice_() {
     // reloads. Same pattern the old on-device receipt used for its own
     // blob URL.
     const blobUrl = URL.createObjectURL(result.blob);
-    const win = window.open(blobUrl, "_blank");
-    if (!win) {
-      showToast("Couldn't open the print preview — check that pop-ups are allowed for this site.");
+    if (previewWin) {
+      previewWin.location.href = blobUrl;
+    } else {
+      window.location.href = blobUrl;
     }
   } finally {
     printBtn.disabled = false;
@@ -3067,47 +3082,40 @@ function buildStopPdfPayload_(actionName, hasSignatureOverride) {
 // abort) — that's the one case that's genuinely a connectivity problem, so
 // it's the only case whose message should say so; every other path returns
 // the real reason from the server in `error` instead of guessing.
-async function fetchPdfBlob_(payload) {
+async function fetchPdfBlob_(payload, getUrl) {
   if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_YOUR") === 0) {
     return { blob: null, error: "The app isn't configured with a backend URL yet.", offline: false };
   }
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
-    const res = await fetch(APPS_SCRIPT_URL, {
+    // The backend can't return a raw PDF (Apps Script web apps only return
+    // text), so it sends {ok:true, pdf_base64:"..."} and we rebuild the PDF here.
+    const res = await fetch(getUrl || APPS_SCRIPT_URL, getUrl ? { signal: controller.signal } : {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
     clearTimeout(timeout);
-    const blob = await res.blob();
-    if (blob.type && blob.type.indexOf("application/json") === 0) {
-      // An {ok:false, error:...} envelope, not a PDF — read the real reason
-      // out of it instead of discarding it. Checked BEFORE the res.ok check
-      // below on purpose: handlePreviewPdf_'s own validation errors (e.g.
-      // "missing field: customer_name") come back as a real non-2xx status
-      // (jsonOut_(..., 400)) WITH a JSON body carrying the actual message —
-      // checking res.ok first would catch that as a generic "HTTP 400" and
-      // throw away the specific reason the backend already provided.
-      let message = "The server couldn't generate the invoice.";
-      try {
-        const errBody = JSON.parse(await blob.text());
-        if (errBody && errBody.error) message = String(errBody.error);
-      } catch (parseErr) {
-        // Body wasn't valid JSON after all — fall back to the generic message above.
-      }
-      return { blob: null, error: message, offline: false };
+    const text = await res.text();
+    let body = null;
+    try { body = JSON.parse(text); } catch (parseErr) { body = null; }
+    if (body && body.ok && body.pdf_base64) {
+      const bin = atob(body.pdf_base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+      return { blob: new Blob([bytes], { type: "application/pdf" }), error: null, offline: false };
+    }
+    if (body && body.error) {
+      return { blob: null, error: String(body.error), offline: false };
     }
     if (!res.ok) {
       return { blob: null, error: "The server returned an error (HTTP " + res.status + ") generating the invoice.", offline: false };
     }
-    return { blob: blob, error: null, offline: false };
+    return { blob: null, error: "The server couldn't generate the invoice.", offline: false };
   } catch (err) {
-    // The ONLY genuinely offline/connectivity case: fetch itself never got
-    // a response (network unreachable, DNS failure, CORS, or the 30s abort
-    // above).
-    console.warn("pdf preview fetch failed", err);
+    console.warn("pdf fetch failed", err);
     return { blob: null, error: null, offline: true };
   }
 }
