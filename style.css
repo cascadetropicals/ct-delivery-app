@@ -636,3 +636,8 @@ canvas#sig-pad { width: 100%; height: 220px; background: #fff; border: 2px dashe
   transition: opacity 0.25s; pointer-events: none; z-index: 200;
 }
 .toast.show { opacity: 1; }
+
+/* Login screen: Test mode switch (ON by default) + note */
+.test-mode-row { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 18px; font-weight: 600; margin: 14px 0 6px; }
+.test-mode-row input { width: 26px; height: 26px; }
+.test-mode-note { margin-top: 18px; padding: 10px 12px; background: #fff7e0; border: 1px solid #e6c866; border-radius: 8px; color: #5a4600; font-size: 15px; }

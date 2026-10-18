@@ -62,6 +62,7 @@ const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbydrIdUUOPO617n
 
 const PINS_FILE = "pins.json";
 const STORAGE_KEY_STATE = "ct_driver_state_v1";
+const STORAGE_KEY_TEST_MODE = "ct_test_mode_v1"; // "off" only when a driver unchecked Test mode on the login screen; anything else = ON (the default)
 const STORAGE_KEY_QUEUE = "ct_offline_queue_v1";
 const STORAGE_KEY_ROUTE_PLAN_CACHE = "ct_route_plan_cache_v1"; // last successfully fetched {manifest, pins}, for offline fallback
 const STORAGE_KEY_ROUTE_TIMING_STATE = "ct_route_timing_state_v1"; // routeStarted_/routeEnded_ + their timestamps, keyed to today's truck+date — see restoreRouteTimingStateLocal_
@@ -405,7 +406,33 @@ function updateLoginBtnState_() {
   loginBtn.disabled = !(selectedTruck && pinInput.value.trim().length >= 4);
 }
 
+// Test mode switch on the login screen. ON unless a driver unchecked it
+// (remembered on this device). Sent with every submit as test_mode so the
+// backend knows whether to redirect the customer email to the test address.
+function isTestMode_() {
+  try {
+    return localStorage.getItem(STORAGE_KEY_TEST_MODE) !== "off";
+  } catch (e) {
+    return true;
+  }
+}
+
+function wireTestModeToggle_() {
+  const toggle = document.getElementById("test-mode-toggle");
+  if (!toggle) return;
+  toggle.checked = isTestMode_();
+  toggle.addEventListener("change", () => {
+    try {
+      if (toggle.checked) localStorage.removeItem(STORAGE_KEY_TEST_MODE);
+      else localStorage.setItem(STORAGE_KEY_TEST_MODE, "off");
+    } catch (e) {
+      // storage unavailable — the switch still works for this page load only via isTestMode_'s default; nothing else to do
+    }
+  });
+}
+
 function wireLoginScreen() {
+  wireTestModeToggle_();
   const pinInput = document.getElementById("pin-input");
   const loginBtn = document.getElementById("login-btn");
   const loginError = document.getElementById("login-error");
@@ -3104,6 +3131,7 @@ function buildStopPdfPayload_(actionName, hasSignatureOverride) {
     rack_photo_image: rackPhotoDataUrl,
     contact_emails: currentStop.contact_emails || [],
     extra_invoice_email: extraInvoiceEmail,
+    test_mode: isTestMode_(),
     submitted_at_iso: new Date().toISOString(),
   };
 }

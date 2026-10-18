@@ -30,7 +30,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-10-17b">
+<link rel="stylesheet" href="style.css?v=2026-10-18a">
 </head>
 <body>
 
@@ -46,10 +46,15 @@
       <!-- Populated dynamically by renderTruckSelect_() in app.js from
            today's published route plan (manifest.trucks) — not hardcoded,
            so any truck with real stops shows up automatically. -->
+      <label class="test-mode-row">
+        <input type="checkbox" id="test-mode-toggle" checked>
+        <span>Test mode</span>
+      </label>
       <div class="truck-select" id="truck-select"></div>
       <input class="pin-input" id="pin-input" type="tel" inputmode="numeric" maxlength="4" placeholder="PIN">
       <button class="primary" id="login-btn" disabled>Start Route</button>
       <div class="error-msg" id="login-error"></div>
+      <p class="test-mode-note">Drivers: if you do real driving with the app, uncheck the Test mode button.</p>
     </div>
   </main>
 </section>
@@ -289,8 +294,8 @@
      inert "web" platform on its own, and the Preferences plugin quietly
      falls back to a plain (differently-prefixed) localStorage key that
      nothing here ever reads back on that build. Must load before app.js. -->
-<script src="capacitor.js?v=2026-10-17b"></script>
-<script src="capacitor-preferences-plugin.js?v=2026-10-17b"></script>
-<script src="app.js?v=2026-10-17b"></script>
+<script src="capacitor.js?v=2026-10-18a"></script>
+<script src="capacitor-preferences-plugin.js?v=2026-10-18a"></script>
+<script src="app.js?v=2026-10-18a"></script>
 </body>
 </html>
