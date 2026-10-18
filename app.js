@@ -62,6 +62,7 @@ const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbydrIdUUOPO617n
 
 const PINS_FILE = "pins.json";
 const STORAGE_KEY_STATE = "ct_driver_state_v1";
+const STORAGE_KEY_FEEDBACK_QUEUE = "ct_feedback_queue_v1"; // feedback answers saved on the device until the backend confirms them
 const STORAGE_KEY_FEEDBACK_SHOWN = "ct_feedback_shown_v1"; // + ":<truck>:<date>" — set once the feedback popup has been shown that day for that truck
 const STORAGE_KEY_TEST_MODE = "ct_test_mode_v1"; // "off" only when a driver unchecked Test mode on the login screen; anything else = ON (the default)
 const STORAGE_KEY_QUEUE = "ct_offline_queue_v1";
@@ -260,7 +261,7 @@ async function init() {
   // a natural moment real connectivity is most likely present, and it
   // doesn't depend on the browser's own (notoriously unreliable on iOS
   // Safari) online/offline detection at all.
-  setInterval(() => { if (readQueue_().length > 0) flushOfflineQueue_(); }, 30000);
+  setInterval(() => { if (readQueue_().length > 0 || readFeedbackQueue_().length > 0) flushOfflineQueue_(); }, 30000);
   // LIVE ROUTE-PLAN REFRESH — see that section's own comment for the full
   // design. Same periodic-timer + visibilitychange pattern as the offline
   // queue flush right above (the incoming-data mirror of that outgoing one).
@@ -274,7 +275,7 @@ async function init() {
     // and to pick up any truck/time/rack change dispatch made while this
     // page wasn't open rather than waiting for the next timer tick.
     reconcileNativeBackgroundSyncs_();
-    if (readQueue_().length > 0) flushOfflineQueue_();
+    if (readQueue_().length > 0 || readFeedbackQueue_().length > 0) flushOfflineQueue_();
     refreshRoutePlanLive_();
   });
   // also try once on load in case there's a leftover queue from a prior offline session
@@ -3001,7 +3002,9 @@ function maybeShowFeedbackPopup_(payload) {
   sendBtn.addEventListener("click", async () => {
     if (!rating) return;
     sendBtn.disabled = true;
-    const ok = await sendToBackend_({
+    // Saved on the device first, so it is never lost (no signal, slow
+    // connection, or a backend that isn't updated yet); sent in the background.
+    queueFeedback_({
       action: "submit_feedback",
       date: payload.date,
       truck: payload.truck,
@@ -3013,11 +3016,61 @@ function maybeShowFeedbackPopup_(payload) {
       submitted_at_iso: new Date().toISOString(),
     });
     overlay.remove();
-    showToast(ok ? "Thanks for the feedback!" : "Couldn't send the feedback \u2014 no connection.");
+    showToast("Thanks for the feedback!");
+    flushFeedbackQueue_();
   });
 
   overlay.appendChild(box);
   document.body.appendChild(overlay);
+}
+
+function readFeedbackQueue_() {
+  try {
+    const q = JSON.parse(localStorage.getItem(STORAGE_KEY_FEEDBACK_QUEUE) || "[]");
+    return Array.isArray(q) ? q : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function writeFeedbackQueue_(q) {
+  try {
+    localStorage.setItem(STORAGE_KEY_FEEDBACK_QUEUE, JSON.stringify(q.slice(-50)));
+  } catch (e) {
+    // storage full/unavailable — nothing more we can do
+  }
+}
+
+function queueFeedback_(item) {
+  item._fid = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+  const q = readFeedbackQueue_();
+  q.push(item);
+  writeFeedbackQueue_(q);
+}
+
+let feedbackFlushing_ = false;
+
+// Sends every saved feedback answer; removes only the ones the backend
+// confirmed. Called after a Send and from flushOfflineQueue_ (online event,
+// 30s timer, app start, etc.), so an answer given offline goes out later.
+async function flushFeedbackQueue_() {
+  if (feedbackFlushing_) return;
+  const pending = readFeedbackQueue_();
+  if (pending.length === 0) return;
+  feedbackFlushing_ = true;
+  try {
+    const sentIds = [];
+    for (const item of pending) {
+      const result = await sendToBackend_(item);
+      if (!result) break; // offline or backend not ready — try again on the next flush
+      sentIds.push(item._fid);
+    }
+    if (sentIds.length > 0) {
+      writeFeedbackQueue_(readFeedbackQueue_().filter((it) => sentIds.indexOf(it._fid) === -1));
+    }
+  } finally {
+    feedbackFlushing_ = false;
+  }
 }
 
 // ==================================================================
@@ -3414,6 +3467,7 @@ function writeQueue_(queue) {
 }
 
 async function flushOfflineQueue_() {
+  flushFeedbackQueue_(); // saved feedback answers ride along on every flush trigger
   if (flushInProgress_) return; // a pass is already running — see the note above queueOffline_
   flushInProgress_ = true;
   try {
