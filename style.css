@@ -638,13 +638,13 @@ canvas#sig-pad { width: 100%; height: 220px; background: #fff; border: 2px dashe
 .toast.show { opacity: 1; }
 
 /* Login screen: Test mode switch above each truck button (iOS-style) + note */
-.truck-col { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.tm-switch { display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; font-size: 13px; font-weight: 600; color: #444; }
+.truck-col { flex: 1; display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
+.tm-switch { display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 8px; cursor: pointer; font-size: 13px; font-weight: 600; color: #2f5233; }
 .tm-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
-.tm-slider { position: relative; width: 52px; height: 30px; border-radius: 15px; background: #8a8a8e; transition: background 0.2s; }
-.tm-slider::after { content: ""; position: absolute; top: 2px; left: 2px; width: 26px; height: 26px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.4); transition: transform 0.2s; }
-.tm-switch input:checked + .tm-slider { background: #34c759; }
-.tm-switch input:checked + .tm-slider::after { transform: translateX(22px); }
+.tm-slider { position: relative; flex: none; width: 44px; height: 26px; border-radius: 13px; background: #b9bfb9; transition: background 0.2s; }
+.tm-slider::after { content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.35); transition: transform 0.2s; }
+.tm-switch input:checked + .tm-slider { background: #2f5233; }
+.tm-switch input:checked + .tm-slider::after { transform: translateX(18px); }
 .tm-switch input:focus-visible + .tm-slider { outline: 2px solid #2f5233; outline-offset: 2px; }
 .test-mode-note { margin-top: 18px; padding: 10px 12px; background: #fff7e0; border: 1px solid #e6c866; border-radius: 8px; color: #5a4600; font-size: 15px; }
 
