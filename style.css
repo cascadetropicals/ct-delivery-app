@@ -637,7 +637,25 @@ canvas#sig-pad { width: 100%; height: 220px; background: #fff; border: 2px dashe
 }
 .toast.show { opacity: 1; }
 
-/* Login screen: Test mode switch (ON by default) + note */
-.test-mode-row { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 18px; font-weight: 600; margin: 14px 0 6px; }
-.test-mode-row input { width: 26px; height: 26px; }
+/* Login screen: Test mode switch above each truck button (iOS-style) + note */
+.truck-col { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.tm-switch { display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; font-size: 13px; font-weight: 600; color: #444; }
+.tm-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.tm-slider { position: relative; width: 52px; height: 30px; border-radius: 15px; background: #8a8a8e; transition: background 0.2s; }
+.tm-slider::after { content: ""; position: absolute; top: 2px; left: 2px; width: 26px; height: 26px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.4); transition: transform 0.2s; }
+.tm-switch input:checked + .tm-slider { background: #34c759; }
+.tm-switch input:checked + .tm-slider::after { transform: translateX(22px); }
+.tm-switch input:focus-visible + .tm-slider { outline: 2px solid #2f5233; outline-offset: 2px; }
 .test-mode-note { margin-top: 18px; padding: 10px 12px; background: #fff7e0; border: 1px solid #e6c866; border-radius: 8px; color: #5a4600; font-size: 15px; }
+
+/* Feedback popup after a submit */
+.feedback-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 10000; padding: 16px; }
+.feedback-box { background: #fff; border-radius: 14px; padding: 22px; width: 100%; max-width: 380px; text-align: center; }
+.feedback-box h3 { margin: 0 0 14px; }
+.feedback-thumbs { display: flex; gap: 16px; justify-content: center; margin-bottom: 14px; }
+.feedback-thumbs button { font-size: 40px; width: 84px; height: 84px; border-radius: 50%; border: 3px solid #ccc; background: #fff; }
+.feedback-thumbs button.selected { border-color: #2f5233; background: #e6f2e7; }
+.feedback-note { width: 100%; box-sizing: border-box; font-size: 16px; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }
+.feedback-actions { display: flex; gap: 10px; margin-top: 14px; }
+.feedback-actions button { flex: 1; padding: 12px; font-size: 16px; border-radius: 10px; }
+.feedback-skip { background: #eee; border: none; }

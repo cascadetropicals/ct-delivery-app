@@ -62,6 +62,7 @@ const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbydrIdUUOPO617n
 
 const PINS_FILE = "pins.json";
 const STORAGE_KEY_STATE = "ct_driver_state_v1";
+const STORAGE_KEY_FEEDBACK_SHOWN = "ct_feedback_shown_v1"; // + ":<truck>:<date>" — set once the feedback popup has been shown that day for that truck
 const STORAGE_KEY_TEST_MODE = "ct_test_mode_v1"; // "off" only when a driver unchecked Test mode on the login screen; anything else = ON (the default)
 const STORAGE_KEY_QUEUE = "ct_offline_queue_v1";
 const STORAGE_KEY_ROUTE_PLAN_CACHE = "ct_route_plan_cache_v1"; // last successfully fetched {manifest, pins}, for offline fallback
@@ -396,7 +397,11 @@ function renderTruckSelect_(trucksIn, truckDrivers) {
       document.getElementById("login-error").textContent = "";
       updateLoginBtnState_();
     });
-    truckSelect.appendChild(btn);
+    const col = document.createElement("div");
+    col.className = "truck-col";
+    col.appendChild(buildTestModeSwitch_(truck));
+    col.appendChild(btn);
+    truckSelect.appendChild(col);
   });
 }
 
@@ -406,33 +411,55 @@ function updateLoginBtnState_() {
   loginBtn.disabled = !(selectedTruck && pinInput.value.trim().length >= 4);
 }
 
-// Test mode switch on the login screen. ON unless a driver unchecked it
-// (remembered on this device). Sent with every submit as test_mode so the
-// backend knows whether to redirect the customer email to the test address.
-function isTestMode_() {
+// Test mode switch above each truck button on the login screen. ON unless
+// a driver unchecked it for THAT truck (remembered on this device, per
+// truck). Sent with every submit as test_mode so the backend knows whether
+// to redirect the customer email to the test address.
+function testModeKey_(truck) {
+  return STORAGE_KEY_TEST_MODE + ":" + truck;
+}
+
+function isTestMode_(truck) {
   try {
-    return localStorage.getItem(STORAGE_KEY_TEST_MODE) !== "off";
+    return localStorage.getItem(testModeKey_(truck)) !== "off";
   } catch (e) {
     return true;
   }
 }
 
-function wireTestModeToggle_() {
-  const toggle = document.getElementById("test-mode-toggle");
-  if (!toggle) return;
-  toggle.checked = isTestMode_();
-  toggle.addEventListener("change", () => {
+// Builds the switch for one truck; returns the <label> to place above the
+// truck's button. Deliberately not a <button>, so the truck-button
+// selection code (which looks at "button" elements) never touches it.
+function buildTestModeSwitch_(truck) {
+  const label = document.createElement("label");
+  label.className = "tm-switch";
+
+  const caption = document.createElement("span");
+  caption.className = "tm-caption";
+  caption.textContent = "Test mode";
+
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = isTestMode_(truck);
+  input.addEventListener("change", () => {
     try {
-      if (toggle.checked) localStorage.removeItem(STORAGE_KEY_TEST_MODE);
-      else localStorage.setItem(STORAGE_KEY_TEST_MODE, "off");
+      if (input.checked) localStorage.removeItem(testModeKey_(truck));
+      else localStorage.setItem(testModeKey_(truck), "off");
     } catch (e) {
-      // storage unavailable — the switch still works for this page load only via isTestMode_'s default; nothing else to do
+      // storage unavailable — nothing else to do; default stays ON
     }
   });
+
+  const slider = document.createElement("span");
+  slider.className = "tm-slider";
+
+  label.appendChild(caption);
+  label.appendChild(input);
+  label.appendChild(slider);
+  return label;
 }
 
 function wireLoginScreen() {
-  wireTestModeToggle_();
   const pinInput = document.getElementById("pin-input");
   const loginBtn = document.getElementById("login-btn");
   const loginError = document.getElementById("login-error");
@@ -2898,6 +2925,99 @@ async function submitStop_(wantsSignature) {
   clearExtraInvoiceEmail_();
   renderRouteList_();
   showScreen_("screen-route");
+  maybeShowFeedbackPopup_(payload);
+}
+
+// ==================================================================
+// FEEDBACK POPUP — "How do you like the app?" after a submit, once per day
+// per truck (skip counts as shown). Thumbs up/down + optional note, sent to
+// the backend's submit_feedback action (Driver Feedback tab). Shown in test
+// mode too, per G.
+// ==================================================================
+function maybeShowFeedbackPopup_(payload) {
+  if (!payload || !payload.truck) return;
+  const shownKey = STORAGE_KEY_FEEDBACK_SHOWN + ":" + payload.truck + ":" + payload.date;
+  try {
+    if (localStorage.getItem(shownKey)) return;
+    localStorage.setItem(shownKey, "1");
+  } catch (e) {
+    return; // can't remember it was shown — better to skip than nag after every stop
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "feedback-overlay";
+  const box = document.createElement("div");
+  box.className = "feedback-box";
+
+  const title = document.createElement("h3");
+  title.textContent = "How do you like the app?";
+  box.appendChild(title);
+
+  let rating = null;
+  const thumbs = document.createElement("div");
+  thumbs.className = "feedback-thumbs";
+  const upBtn = document.createElement("button");
+  upBtn.type = "button";
+  upBtn.textContent = "\u{1F44D}";
+  upBtn.setAttribute("aria-label", "Thumbs up");
+  const downBtn = document.createElement("button");
+  downBtn.type = "button";
+  downBtn.textContent = "\u{1F44E}";
+  downBtn.setAttribute("aria-label", "Thumbs down");
+  thumbs.appendChild(upBtn);
+  thumbs.appendChild(downBtn);
+  box.appendChild(thumbs);
+
+  const note = document.createElement("textarea");
+  note.className = "feedback-note";
+  note.rows = 3;
+  note.placeholder = "Anything we should fix or improve? (optional)";
+  box.appendChild(note);
+
+  const actions = document.createElement("div");
+  actions.className = "feedback-actions";
+  const skipBtn = document.createElement("button");
+  skipBtn.type = "button";
+  skipBtn.className = "feedback-skip";
+  skipBtn.textContent = "Skip";
+  const sendBtn = document.createElement("button");
+  sendBtn.type = "button";
+  sendBtn.className = "primary";
+  sendBtn.textContent = "Send";
+  sendBtn.disabled = true;
+  actions.appendChild(skipBtn);
+  actions.appendChild(sendBtn);
+  box.appendChild(actions);
+
+  function pick_(value) {
+    rating = value;
+    upBtn.classList.toggle("selected", value === "up");
+    downBtn.classList.toggle("selected", value === "down");
+    sendBtn.disabled = false;
+  }
+  upBtn.addEventListener("click", () => pick_("up"));
+  downBtn.addEventListener("click", () => pick_("down"));
+  skipBtn.addEventListener("click", () => overlay.remove());
+  sendBtn.addEventListener("click", async () => {
+    if (!rating) return;
+    sendBtn.disabled = true;
+    const ok = await sendToBackend_({
+      action: "submit_feedback",
+      date: payload.date,
+      truck: payload.truck,
+      stop_id: payload.stop_id,
+      customer_name: payload.customer_name,
+      rating: rating,
+      note: note.value.trim(),
+      test_mode: payload.test_mode,
+      submitted_at_iso: new Date().toISOString(),
+    });
+    overlay.remove();
+    showToast(ok ? "Thanks for the feedback!" : "Couldn't send the feedback \u2014 no connection.");
+  });
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
 }
 
 // ==================================================================
@@ -3131,7 +3251,7 @@ function buildStopPdfPayload_(actionName, hasSignatureOverride) {
     rack_photo_image: rackPhotoDataUrl,
     contact_emails: currentStop.contact_emails || [],
     extra_invoice_email: extraInvoiceEmail,
-    test_mode: isTestMode_(),
+    test_mode: isTestMode_(currentStop.truck),
     submitted_at_iso: new Date().toISOString(),
   };
 }
