@@ -86,6 +86,7 @@ const STORAGE_KEY_NATIVE_APPS_SCRIPT_URL = "ct_apps_script_url"; // APPS_SCRIPT_
 // ---------- app state ----------
 let manifest = null;
 let pins = null;
+let routePlanBlockMessage_ = null; // set when the backend says there is no route plan for TODAY (code not_today); shown instead of any old/cached route
 let manifestReadyPromise_ = null; // set once in init() to loadFullRoutePlan_()'s promise; the login button handler awaits this if the driver taps "Start Route" before the full route plan has finished loading in the background — see both places below
 let selectedTruck = null;   // truck chosen on login screen, before PIN is confirmed
 let currentTruck = null;    // truck the driver is logged into
@@ -205,6 +206,17 @@ async function init() {
       fetch(PINS_FILE, { cache: "no-store" }),
     ]);
     const trucksJson = await trucksRes.json();
+    if (trucksJson && trucksJson.ok === false && trucksJson.code === "not_today") {
+      // The office hasn't published TODAY's plan (or only an old one exists).
+      // Never fall back to the cache here - that would show an old route.
+      routePlanBlockMessage_ = trucksJson.error || "No route plan for today has been published yet.";
+      document.getElementById("login-date").textContent = "No route plan for today";
+      showToast(routePlanBlockMessage_);
+      const blockedErr = document.getElementById("login-error");
+      if (blockedErr) blockedErr.textContent = routePlanBlockMessage_;
+      document.getElementById("truck-select").innerHTML = "";
+      return;
+    }
     if (trucksJson && trucksJson.ok === false) {
       if (!cachedPlan) {
         showToast(trucksJson.error || "No route plan published yet.");
@@ -304,6 +316,10 @@ async function loadFullRoutePlan_(cachedPlan) {
     // that against today (see the TODO comment on getRoutePlanForRequest_
     // in Code.gs for why, and why that check should come back before this
     // is relied on for real daily driving).
+    if (manifestJson && manifestJson.ok === false && manifestJson.code === "not_today") {
+      routePlanBlockMessage_ = manifestJson.error || "No route plan for today has been published yet.";
+      return false; // deliberately NO cache fallback - an old plan must never show
+    }
     if (manifestJson && manifestJson.ok === false) {
       if (!cachedPlan) {
         console.error("route plan fetch returned an error, and no offline cache available", manifestJson);
@@ -515,7 +531,7 @@ function wireLoginScreen() {
       loginBtn.textContent = originalLabel;
       if (!loaded || !manifest) {
         loginBtn.disabled = false;
-        loginError.textContent = "Could not load today's route details. Check your connection and try again.";
+        loginError.textContent = routePlanBlockMessage_ || "Could not load today's route details. Check your connection and try again.";
         return;
       }
       updateLoginBtnState_();
@@ -1172,6 +1188,18 @@ const LIVE_STOP_FIELDS_ = [
 // (visibilitychange) — same "coming back into view is the natural moment to
 // check" reasoning flushOfflineQueue_/reconcileNativeBackgroundSyncs_
 // already use for the outgoing side of this same idea.
+function reloadForNewPlanIfSafe_() {
+  const onLogin = document.getElementById("screen-login").classList.contains("active");
+  const onRoute = document.getElementById("screen-route").classList.contains("active");
+  if (!onLogin && !onRoute) return; // a stop/signature is open - try again on the next check
+  try {
+    const last = Number(sessionStorage.getItem("ct_plan_reload_at") || 0);
+    if (Date.now() - last < 10 * 60 * 1000) return;
+    sessionStorage.setItem("ct_plan_reload_at", String(Date.now()));
+  } catch (e) { /* storage unavailable - reload anyway once */ }
+  location.reload();
+}
+
 async function refreshRoutePlanLive_() {
   if (!manifest) return; // nothing loaded yet (still mid-login) — nothing to refresh
   let json;
@@ -1188,6 +1216,14 @@ async function refreshRoutePlanLive_() {
     json = await res.json();
   } catch (err) {
     console.warn("live route-plan refresh failed (network) — keeping what's already loaded", err);
+    return;
+  }
+  // A different plan date than the one loaded (new day's plan published, or
+  // the old one is no longer today's): reload so the new plan shows up by
+  // itself - but only from the login or route-list screen, never mid-stop,
+  // and at most once per 10 minutes (loop guard).
+  if (json && ((json.ok === false && json.code === "not_today") || (json.dispatch_date && json.dispatch_date !== manifest.dispatch_date))) {
+    reloadForNewPlanIfSafe_();
     return;
   }
   if (!json || json.ok === false || !Array.isArray(json.stops)) {
@@ -3665,7 +3701,14 @@ function saveRoutePlanCache_(manifestToCache, pinsToCache) {
 function loadRoutePlanCache_() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_ROUTE_PLAN_CACHE);
-    return raw ? JSON.parse(raw) : null;
+    const cached = raw ? JSON.parse(raw) : null;
+    // Today-only: when the backend enforces it, a cached plan from another
+    // day is thrown away so an old route can never show (offline included).
+    if (cached && cached.manifest && cached.manifest.enforce_today) {
+      const todayPT = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+      if (cached.manifest.dispatch_date !== todayPT) return null;
+    }
+    return cached;
   } catch (err) {
     return null;
   }
