@@ -30,7 +30,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-10-23a">
+<link rel="stylesheet" href="style.css?v=2026-10-27a">
 </head>
 <body>
 
@@ -238,6 +238,22 @@
       <button class="secondary" id="print-pdf-btn-signature">Print Invoice</button>
     </div>
 
+    <!-- 2026-10-27, G's two requests: a "Paper invoice" checkbox (so office can
+         evaluate preparing paper invoices for these customers) and how the
+         customer pays on delivery (none / check / cash; a check needs its
+         number). Saved to the "Payment & Paper Log" tab - see submitStop_. -->
+    <div class="pay-box" id="pay-box">
+      <div class="section-title">Invoice &amp; Payment</div>
+      <label class="check-row"><input type="checkbox" id="paper-invoice-checkbox"> Paper invoice &mdash; this customer should get a paper invoice</label>
+      <label class="hint" for="payment-method-select">Customer pays on delivery with:</label>
+      <select id="payment-method-select">
+        <option value="none" selected>Nothing (on terms or already paid online)</option>
+        <option value="check">Check</option>
+        <option value="cash">Cash</option>
+      </select>
+      <input type="text" id="check-number-input" class="hidden" placeholder="Check number (required)" inputmode="numeric" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </div>
+
     <div class="section-title">Photo of Delivered Rack (optional)</div>
     <p class="hint">Snap a photo of each rack that was delivered</p>
     <div class="photo-box">
@@ -290,8 +306,8 @@
      inert "web" platform on its own, and the Preferences plugin quietly
      falls back to a plain (differently-prefixed) localStorage key that
      nothing here ever reads back on that build. Must load before app.js. -->
-<script src="capacitor.js?v=2026-10-23a"></script>
-<script src="capacitor-preferences-plugin.js?v=2026-10-23a"></script>
-<script src="app.js?v=2026-10-23a"></script>
+<script src="capacitor.js?v=2026-10-27a"></script>
+<script src="capacitor-preferences-plugin.js?v=2026-10-27a"></script>
+<script src="app.js?v=2026-10-27a"></script>
 </body>
 </html>

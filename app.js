@@ -1399,6 +1399,7 @@ function openStopScreen_(stop) {
     clearRackPhoto_();
     clearSkipReason_();
     clearExtraInvoiceEmail_();
+    clearPaymentFields_();
 
     // A stop that was already submitted: put its removed/rejected/missing
     // items and added items back exactly as they were submitted, so the
@@ -1406,6 +1407,7 @@ function openStopScreen_(stop) {
     // looking like "delivered exactly as ordered".
     const savedState = stop.driver_state;
     if (savedState && savedState.status) {
+      setPaymentFields_(savedState);
       const savedLines = getLineItems_(stop);
       (savedState.exceptions || []).forEach((ex) => {
         const exCode = String(ex.item_code || "").trim().toLowerCase();
@@ -2523,6 +2525,12 @@ function wireSignatureScreen() {
     openStopScreen_(currentStop);
   });
   document.getElementById("clear-sig-btn").addEventListener("click", clearSignaturePad_);
+  document.getElementById("payment-method-select").addEventListener("change", () => {
+    const isCheck = document.getElementById("payment-method-select").value === "check";
+    const checkInput = document.getElementById("check-number-input");
+    checkInput.classList.toggle("hidden", !isCheck);
+    if (isCheck) checkInput.focus(); else checkInput.value = "";
+  });
   document.getElementById("submit-btn").addEventListener("click", () => submitStop_(true));
   document.getElementById("skip-sig-btn").addEventListener("click", () => submitStop_(false));
 
@@ -2800,6 +2808,32 @@ function clearSkipReason_() {
 // email to send the final invoice to" — reset the same way the skip-reason
 // select/signature pad/rack photo are, on a genuinely new stop only (see
 // openStopScreen_), never on a same-stop back-and-forth.
+// Paper invoice checkbox + payment choice (Signature screen).
+function getPaymentFields_() {
+  const paper = document.getElementById("paper-invoice-checkbox");
+  const method = document.getElementById("payment-method-select");
+  const check = document.getElementById("check-number-input");
+  const m = method ? method.value : "none";
+  return {
+    paper_invoice: !!(paper && paper.checked),
+    payment_method: m === "check" || m === "cash" ? m : "none",
+    check_number: m === "check" && check ? check.value.trim() : "",
+  };
+}
+function setPaymentFields_(f) {
+  f = f || {};
+  const paper = document.getElementById("paper-invoice-checkbox");
+  const method = document.getElementById("payment-method-select");
+  const check = document.getElementById("check-number-input");
+  if (paper) paper.checked = !!f.paper_invoice;
+  if (method) method.value = f.payment_method === "check" || f.payment_method === "cash" ? f.payment_method : "none";
+  if (check) {
+    check.value = f.payment_method === "check" ? (f.check_number || "") : "";
+    check.classList.toggle("hidden", !(method && method.value === "check"));
+  }
+}
+function clearPaymentFields_() { setPaymentFields_({}); }
+
 function clearExtraInvoiceEmail_() {
   const input = document.getElementById("extra-invoice-email-input");
   if (input) input.value = "";
@@ -2897,6 +2931,14 @@ async function submitStop_(wantsSignature) {
     return;
   }
 
+  const payFields = getPaymentFields_();
+  if (payFields.payment_method === "check" && !payFields.check_number) {
+    showToast("Enter the check number before submitting.");
+    const checkInput = document.getElementById("check-number-input");
+    if (checkInput) checkInput.focus();
+    return;
+  }
+
   isSubmitting = true;
   document.getElementById("submit-btn").disabled = true;
   document.getElementById("skip-sig-btn").disabled = true;
@@ -2929,6 +2971,9 @@ async function submitStop_(wantsSignature) {
     signature_skipped_reason: payload.signature_skipped_reason,
     rack_photo_image: rackPhotoDataUrl,
     signed_at: payload.submitted_at_iso,
+    paper_invoice: payload.paper_invoice,
+    payment_method: payload.payment_method,
+    check_number: payload.check_number,
     status: newStatus,
   });
   applyStoredDriverState_();
@@ -2960,6 +3005,7 @@ async function submitStop_(wantsSignature) {
   addItemSearchText_ = "";
   rackPhotoDataUrl = null;
   clearExtraInvoiceEmail_();
+  clearPaymentFields_();
   renderRouteList_();
   showScreen_("screen-route");
   maybeShowFeedbackPopup_(payload);
@@ -3341,6 +3387,9 @@ function buildStopPdfPayload_(actionName, hasSignatureOverride) {
     contact_emails: currentStop.contact_emails || [],
     extra_invoice_email: extraInvoiceEmail,
     test_mode: isTestMode_(currentStop.truck),
+    paper_invoice: getPaymentFields_().paper_invoice,
+    payment_method: getPaymentFields_().payment_method,
+    check_number: getPaymentFields_().check_number,
     submitted_at_iso: new Date().toISOString(),
   };
 }
