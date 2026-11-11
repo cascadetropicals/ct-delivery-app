@@ -30,7 +30,7 @@
      several minutes (or a hard reload) to actually show up otherwise. Bump
      this string any time app.js or style.css changes so the new file is
      guaranteed to load right away instead of a stale cached copy. -->
-<link rel="stylesheet" href="style.css?v=2026-11-11d">
+<link rel="stylesheet" href="style.css?v=2026-11-11e">
 </head>
 <body>
 
@@ -104,6 +104,7 @@
     <div class="title-wrap">
       <h1 id="stop-name">Customer</h1>
       <div class="sub" id="stop-meta"></div>
+      <div id="stop-pay-badges"></div>
     </div>
   </header>
   <main>
@@ -244,6 +245,7 @@
          number). Saved to the "Payment & Paper Log" tab - see submitStop_. -->
     <div class="pay-box" id="pay-box">
       <div class="section-title">Invoice &amp; Payment</div>
+      <div id="pay-paid-note" class="paid-note hidden">PAID at the greenhouse &mdash; do not collect payment.</div>
       <label class="check-row"><input type="checkbox" id="paper-invoice-checkbox"> Paper invoice &mdash; this customer should get a paper invoice</label>
       <label class="hint" for="payment-method-select">Customer pays on delivery with:</label>
       <select id="payment-method-select">
@@ -306,8 +308,8 @@
      inert "web" platform on its own, and the Preferences plugin quietly
      falls back to a plain (differently-prefixed) localStorage key that
      nothing here ever reads back on that build. Must load before app.js. -->
-<script src="capacitor.js?v=2026-11-11d"></script>
-<script src="capacitor-preferences-plugin.js?v=2026-11-11d"></script>
-<script src="app.js?v=2026-11-11d"></script>
+<script src="capacitor.js?v=2026-11-11e"></script>
+<script src="capacitor-preferences-plugin.js?v=2026-11-11e"></script>
+<script src="app.js?v=2026-11-11e"></script>
 </body>
 </html>

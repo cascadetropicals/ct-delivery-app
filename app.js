@@ -849,6 +849,7 @@ function renderRouteList_() {
     appendAddressWithBoldCity_(meta, stop.address || "");
     left.appendChild(time);
     left.appendChild(name);
+    left.appendChild(buildPayBadges_(stop));
     left.appendChild(meta);
 
     const pill = document.createElement("span");
@@ -1286,6 +1287,8 @@ async function refreshRoutePlanLive_() {
 
   // Deliveries the backend already has for today (from any iPad/browser).
   if (Array.isArray(json.submitted_stops)) applyServerSubmittedStops_(json.submitted_stops);
+  // Orders the checkout team marked PAID ("Paid Orders" tab).
+  if (Array.isArray(json.paid_orders)) applyPaidOrders_(json.paid_orders);
 
   saveRoutePlanCache_(manifest, pins);
 
@@ -1300,6 +1303,54 @@ async function refreshRoutePlanLive_() {
     renderStopLiveLabels_(currentStop);
     renderStopWarnings_(currentStop);
   }
+}
+
+// Stamps order.paid on every order of every stop from the checkout team's
+// "Paid Orders" list. Run on every live refresh, so removing an order from
+// the tab un-marks it. The flag lives on the order objects, so it is also
+// kept in the offline route-plan cache.
+function applyPaidOrders_(list) {
+  const paid = new Set(list.map((n) => String(n).trim()));
+  manifest.stops.forEach((s) => {
+    (s.orders || []).forEach((o) => { o.paid = paid.has(String(o.order_number).trim()); });
+  });
+}
+
+// "all" = every order on the stop is paid, "some" = only part, "none".
+function stopPaidState_(stop) {
+  const orders = stop.orders || [];
+  if (orders.length === 0) return "none";
+  const n = orders.filter((o) => o.paid).length;
+  return n === 0 ? "none" : (n === orders.length ? "all" : "some");
+}
+
+// Payment term chip (colored by term) + PAID badge, for the route list and
+// the stop screen. Built with textContent only (ERP text is never markup).
+function buildPayBadges_(stop) {
+  const wrap = document.createElement("div");
+  wrap.className = "pay-badges";
+  const term = String(stop.payment_terms || "").trim();
+  if (term) {
+    const t = term.toLowerCase();
+    let cls = "term-other";
+    if (t.indexOf("due on receipt") >= 0) cls = "term-due";
+    else if (t.indexOf("net") === 0) cls = "term-net";
+    else if (t.indexOf("webshop") >= 0) cls = "term-webshop";
+    else if (t === "cod" || t.indexOf("cash on delivery") >= 0) cls = "term-cod";
+    else if (t.indexOf("nnba") >= 0) cls = "term-nnba";
+    const chip = document.createElement("span");
+    chip.className = "term-chip " + cls;
+    chip.textContent = term;
+    wrap.appendChild(chip);
+  }
+  const ps = stopPaidState_(stop);
+  if (ps !== "none") {
+    const b = document.createElement("span");
+    b.className = "paid-badge" + (ps === "some" ? " partly" : "");
+    b.textContent = ps === "all" ? "PAID - do not collect" : "PARTLY PAID";
+    wrap.appendChild(b);
+  }
+  return wrap;
 }
 
 // Marks a stop Delivered on this device when the backend already has its
@@ -1373,6 +1424,18 @@ function renderStopLiveLabels_(stop) {
     " · " + (stop.payment_terms || "") +
     (stop.sales_person ? " · Sales: " + stop.sales_person : "")
   ));
+  const payEl = document.getElementById("stop-pay-badges");
+  if (payEl) { payEl.innerHTML = ""; payEl.appendChild(buildPayBadges_(stop)); }
+  // Fully paid: say so in the Invoice & Payment box and lock the choice to
+  // "Nothing" so the driver is never prompted to take a payment.
+  const fullyPaid = stopPaidState_(stop) === "all";
+  const paidNote = document.getElementById("pay-paid-note");
+  if (paidNote) paidNote.classList.toggle("hidden", !fullyPaid);
+  const paySel = document.getElementById("payment-method-select");
+  if (paySel) {
+    if (fullyPaid) { paySel.value = "none"; const ci = document.getElementById("check-number-input"); if (ci) ci.classList.add("hidden"); }
+    paySel.disabled = fullyPaid;
+  }
 
   // Order note + delivery instructions at the top of the screen, per G's
   // "show order note at top - not just delivery note" — set here rather
