@@ -14,14 +14,14 @@
  * cached shell forever. Same "bump the version string" rule as
  * index.html's ?v=, see the comment there and in PROJECT-NOTES.md.
  */
-const CACHE_NAME = "ct-delivery-shell-v2026-11-11e";
+const CACHE_NAME = "ct-delivery-shell-v2026-11-11f";
 const SHELL_FILES = [
   "./",
   "./index.html",
-  "./style.css?v=2026-11-11e",
-  "./capacitor.js?v=2026-11-11e",
-  "./capacitor-preferences-plugin.js?v=2026-11-11e",
-  "./app.js?v=2026-11-11e",
+  "./style.css?v=2026-11-11f",
+  "./capacitor.js?v=2026-11-11f",
+  "./capacitor-preferences-plugin.js?v=2026-11-11f",
+  "./app.js?v=2026-11-11f",
   "./pins.json",
   // Android home-screen manifest + icons (2026-09-29) — no ?v= cache-buster
   // on these since they're new files, not edits to an existing cached one;

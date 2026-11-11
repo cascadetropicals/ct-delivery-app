@@ -1429,6 +1429,16 @@ function renderStopLiveLabels_(stop) {
   // Fully paid: say so in the Invoice & Payment box and lock the choice to
   // "Nothing" so the driver is never prompted to take a payment.
   const fullyPaid = stopPaidState_(stop) === "all";
+  // Partly paid: list which orders are paid and which still need collecting.
+  const partlyNote = document.getElementById("pay-partly-note");
+  if (partlyNote) {
+    const isPartly = stopPaidState_(stop) === "some";
+    partlyNote.classList.toggle("hidden", !isPartly);
+    partlyNote.textContent = isPartly
+      ? "PARTLY PAID. Already paid: " + (stop.orders || []).filter((o) => o.paid).map((o) => o.order_number).join(", ") +
+        ". Still to collect: " + (stop.orders || []).filter((o) => !o.paid).map((o) => o.order_number).join(", ") + "."
+      : "";
+  }
   const paidNote = document.getElementById("pay-paid-note");
   if (paidNote) paidNote.classList.toggle("hidden", !fullyPaid);
   const paySel = document.getElementById("payment-method-select");
