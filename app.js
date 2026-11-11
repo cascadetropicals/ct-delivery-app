@@ -1152,6 +1152,17 @@ function stopKey_(stop) {
   return (stop && (stop.customer_code || stop.stop_id)) || "";
 }
 
+// Key the saved delivered-status is stored under on this device: date |
+// truck | customer. Date so last week's delivery of the same customer can
+// never make today's stop look delivered; truck so the same customer on two
+// trucks the same day gets two separate statuses (stopKey_ above stays
+// customer-only, it is only the in-memory identity for live refreshes).
+// Added 2026-11-11 (driver saw "Delivered" before delivering; some stops
+// stayed "Pending" after Submit).
+function stateKey_(stop) {
+  if (!stop) return "";
+  return (manifest ? manifest.dispatch_date : "") + "|" + (stop.truck || "") + "|" + stopKey_(stop);
+}
 // Per-stop fields that come straight off ERP-outFuture and can legitimately
 // change between refreshes — see buildLiveRouteStops_'s own doc comment in
 // Code.gs for the exact static/live split this mirrors. Deliberately
@@ -1231,12 +1242,25 @@ async function refreshRoutePlanLive_() {
     return;
   }
 
-  const existingByKey = new Map(manifest.stops.map((s) => [stopKey_(s), s]));
-  const freshKeys = new Set();
-  const merged = json.stops.map((fresh) => {
-    const key = stopKey_(fresh);
-    freshKeys.add(key);
-    const existing = existingByKey.get(key);
+  // One-to-one matching of fresh stops onto the stops already on this device.
+  // A customer can legitimately have two stops on one day (same customer on
+  // two trucks), so customer_code alone is NOT unique: first claim exact
+  // customer+truck matches, then let a remaining fresh stop take over an
+  // unclaimed existing stop of the same customer (a stop reassigned to
+  // another truck), and only then treat it as brand new.
+  const usedExisting = new Set();
+  const matchFor = new Array(json.stops.length).fill(null);
+  json.stops.forEach((fresh, i) => {
+    const hit = manifest.stops.find((s) => !usedExisting.has(s) && stopKey_(s) === stopKey_(fresh) && s.truck === fresh.truck);
+    if (hit) { usedExisting.add(hit); matchFor[i] = hit; }
+  });
+  json.stops.forEach((fresh, i) => {
+    if (matchFor[i]) return;
+    const hit = manifest.stops.find((s) => !usedExisting.has(s) && stopKey_(s) === stopKey_(fresh));
+    if (hit) { usedExisting.add(hit); matchFor[i] = hit; }
+  });
+  const merged = json.stops.map((fresh, i) => {
+    const existing = matchFor[i];
     if (existing) {
       LIVE_STOP_FIELDS_.forEach((field) => { existing[field] = fresh[field]; });
       return existing;
@@ -1245,7 +1269,7 @@ async function refreshRoutePlanLive_() {
   });
   // Keep any previously-known stop the fresh fetch didn't return — see the
   // merge-policy comment above.
-  manifest.stops.forEach((s) => { if (!freshKeys.has(stopKey_(s))) merged.push(s); });
+  manifest.stops.forEach((s) => { if (!usedExisting.has(s)) merged.push(s); });
   manifest.stops = merged;
   // A stop that was briefly missing from one live fetch and then reappears
   // arrives above as a brand-new object (the "return fresh" branch, not the
@@ -1373,7 +1397,7 @@ function openStopScreen_(stop) {
   // whenever a stop's truck or delivery time changes, so comparing it here
   // would wrongly treat "the same stop, just reassigned" as a brand-new
   // stop and wipe out whatever the driver had already flagged/counted/added.
-  const isNewStop = !currentStop || stopKey_(currentStop) !== stopKey_(stop);
+  const isNewStop = !currentStop || (currentStop !== stop && (stopKey_(currentStop) !== stopKey_(stop) || currentStop.truck !== stop.truck));
   currentStop = stop;
   if (isNewStop) {
     flaggedItems = {};
@@ -2963,7 +2987,7 @@ async function submitStop_(wantsSignature) {
   // changes the route list's pill COLOR (done_clean/done_exceptions both
   // render green now — see PROJECT-NOTES.md), only the underlying record.
   const newStatus = (exceptions.length > 0 || hasAddedItems) ? "done_exceptions" : "done_clean";
-  saveDriverStateLocal_(stopKey_(currentStop), {
+  saveDriverStateLocal_(stateKey_(currentStop), {
     racks_unloaded: racksUnloaded,
     exceptions: exceptions,
     added_items: addedItemsPayload,
@@ -2995,7 +3019,12 @@ async function submitStop_(wantsSignature) {
   const customerName = currentStop.customer_name;
   queueOffline_(payload);
   flushOfflineQueue_();
-  showToast("Saved — sending " + customerName + "'s delivery in the background.");
+  if (driverStateSaveFailed_) {
+    driverStateSaveFailed_ = false;
+    showToast("Delivery sent, but this iPad is out of storage and may forget it after a reload. Tell the office.");
+  } else {
+    showToast("Saved — sending " + customerName + "'s delivery in the background.");
+  }
 
   isSubmitting = false;
   currentStop = null;
@@ -3580,7 +3609,7 @@ async function flushOfflineQueue_() {
         // customer_code, not stop_id — see stopKey_'s comment. Falls back to
         // stop_id for a payload queued before this existed / the rare stop
         // with no customer_code, same as stopKey_ itself does.
-        mergeDriverStateLocal_(payload.customer_code || payload.stop_id, { pdf_file_id: result.pdf_file_id });
+        mergeDriverStateLocal_((payload.date || (manifest && manifest.dispatch_date) || "") + "|" + (payload.truck || "") + "|" + (payload.customer_code || payload.stop_id), { pdf_file_id: result.pdf_file_id });
         anyPdfSynced = true;
       }
     }
@@ -3720,7 +3749,10 @@ async function reconcileNativeBackgroundSyncs_() {
     // echoes customer_code back from the queued payload alongside stop_id
     // (see its own comment) so this stays keyed the same way the web-side
     // queue flush above is.
-    const key = e.customer_code || e.stop_id;
+    const code = e.customer_code || e.stop_id;
+    const hit = manifest && manifest.stops.find((st) => st.stop_id === e.stop_id && stopKey_(st) === code)
+      || (manifest && manifest.stops.find((st) => stopKey_(st) === code));
+    const key = hit ? stateKey_(hit) : "";
     if (key && e.pdf_file_id) {
       mergeDriverStateLocal_(key, { pdf_file_id: e.pdf_file_id });
       anyPdfSynced = true;
@@ -3800,15 +3832,38 @@ function registerServiceWorker_() {
 // object) rather than a stop object, so this file stays intentionally naive
 // about what the key actually is.
 // ==================================================================
+// Copy of what was saved this session, so a stop keeps showing "Delivered"
+// even if the iPad's storage is full and the write below fails.
+const memoryDriverState_ = {};
+
+// Writes the whole store; if the iPad's storage is full, first frees space
+// (drops other days' records, then the big signature/photo images of other
+// stops) and retries. Returns true if it was persisted.
+function persistDriverStateStore_(all) {
+  try { localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all)); return true; } catch (e1) { /* fall through */ }
+  const today = (manifest ? manifest.dispatch_date : "") + "|";
+  Object.keys(all).forEach((k) => { if (k.indexOf(today) !== 0) delete all[k]; });
+  try { localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all)); return true; } catch (e2) { /* fall through */ }
+  Object.keys(all).forEach((k) => {
+    const v = Object.assign({}, all[k]);
+    delete v.signature_image; delete v.rack_photo_image;
+    all[k] = v;
+  });
+  try { localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all)); return true; } catch (e3) { return false; }
+}
+
 function saveDriverStateLocal_(key, state) {
+  memoryDriverState_[key] = Object.assign({}, state);
   const all = readDriverStateStore_();
   all[key] = state;
-  try {
-    localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all));
-  } catch (err) {
-    console.warn("could not persist driver state", err);
+  const ok = persistDriverStateStore_(all);
+  if (!ok) {
+    console.warn("could not persist driver state");
+    driverStateSaveFailed_ = true;
   }
+  return ok;
 }
+let driverStateSaveFailed_ = false; // set when a save could not be stored; submitStop_ turns it into a visible warning
 
 // Patches a few fields onto a stop's already-saved state instead of
 // replacing the whole record the way saveDriverStateLocal_ does — used for
@@ -3817,13 +3872,10 @@ function saveDriverStateLocal_(key, state) {
 // submit for an online delivery, or later on offline-queue sync), and must
 // not clobber it.
 function mergeDriverStateLocal_(key, patch) {
+  memoryDriverState_[key] = Object.assign({}, memoryDriverState_[key], patch);
   const all = readDriverStateStore_();
   all[key] = Object.assign({}, all[key], patch);
-  try {
-    localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all));
-  } catch (err) {
-    console.warn("could not persist driver state", err);
-  }
+  persistDriverStateStore_(all);
 }
 function readDriverStateStore_() {
   try {
@@ -3833,11 +3885,22 @@ function readDriverStateStore_() {
   }
 }
 function applyStoredDriverState_() {
-  const stored = readDriverStateStore_();
+  let stored = readDriverStateStore_();
+  // Drop anything saved for another day (or in the old customer-only format):
+  // it is never needed again and its signature/photo images fill up the
+  // iPad's storage over time.
+  const prefix = manifest.dispatch_date + "|";
+  let pruned = false;
+  Object.keys(stored).forEach((k) => {
+    if (k.indexOf(prefix) !== 0) { delete stored[k]; pruned = true; }
+  });
+  if (pruned) {
+    try { localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(stored)); } catch (err) { /* ignore */ }
+  }
   manifest.stops.forEach((stop) => {
-    const key = stopKey_(stop);
-    if (stored[key]) {
-      stop.driver_state = Object.assign({}, stop.driver_state, stored[key]);
+    const key = stateKey_(stop);
+    if (stored[key] || memoryDriverState_[key]) {
+      stop.driver_state = Object.assign({}, stop.driver_state, stored[key], memoryDriverState_[key]);
     }
   });
 }
