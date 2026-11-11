@@ -1284,6 +1284,9 @@ async function refreshRoutePlanLive_() {
   truckDriverNames_ = manifest.truck_drivers;
   truckStartTimes_ = manifest.truck_start_times;
 
+  // Deliveries the backend already has for today (from any iPad/browser).
+  if (Array.isArray(json.submitted_stops)) applyServerSubmittedStops_(json.submitted_stops);
+
   saveRoutePlanCache_(manifest, pins);
 
   // Re-render whatever's actually on screen so the change is visible right
@@ -1297,6 +1300,28 @@ async function refreshRoutePlanLive_() {
     renderStopLiveLabels_(currentStop);
     renderStopWarnings_(currentStop);
   }
+}
+
+// Marks a stop Delivered on this device when the backend already has its
+// delivery (sent from another iPad, from Safari instead of the home-screen
+// app, or before website data was cleared). Only deliveries in the same mode
+// count: a truck in test mode picks up test deliveries, a live truck only
+// live ones, so a training run never marks real stops as delivered.
+function applyServerSubmittedStops_(list) {
+  let changed = false;
+  list.forEach((e) => {
+    const stop = manifest.stops.find((s) => s.truck === e.truck &&
+      (e.customer_code ? s.customer_code === e.customer_code : s.stop_id === e.stop_id));
+    if (!stop) return;
+    if (!!e.test !== !!isTestMode_(stop.truck)) return;
+    const have = stop.driver_state && stop.driver_state.status;
+    if (have && String(have).indexOf("done") === 0) return;
+    const patch = { status: e.status === "done_exceptions" ? "done_exceptions" : "done_clean" };
+    if (e.pdf_file_id) patch.pdf_file_id = e.pdf_file_id;
+    mergeDriverStateLocal_(stateKey_(stop), patch);
+    changed = true;
+  });
+  if (changed) applyStoredDriverState_();
 }
 
 // Sets the header/meta/notes/expected-racks-label text off `stop`'s CURRENT
@@ -2928,6 +2953,68 @@ function compressImageFile_(file, maxDim, quality) {
 let isSubmitting = false; // guards against a double-tap firing two submits for one stop
 
 async function submitStop_(wantsSignature) {
+  try {
+    await submitStopInner_(wantsSignature);
+  } catch (err) {
+    // The delivery is queued before anything below it can fail (see
+    // submitStopInner_), so all that is left is to leave the screen in a
+    // clean state. The driver is never asked to submit twice.
+    console.error("error after the delivery was queued", err);
+    isSubmitting = false;
+    try {
+      currentStop = null;
+      flaggedItems = {};
+      addedItems = {};
+      rackPhotoDataUrl = null;
+      renderRouteList_();
+      showScreen_("screen-route");
+    } catch (e2) { /* nothing more to do */ }
+  }
+}
+
+// Smallest payload the backend accepts, built only from plain stop fields.
+// Used only if the normal builder fails twice, so a delivery is still sent
+// (without signature/photo/exception details) instead of being lost.
+function buildMinimalSubmitPayload_(skipReason) {
+  const st = currentStop || {};
+  let lines = [];
+  try { lines = getLineItems_(st); } catch (e) { lines = []; }
+  let total = null;
+  try { total = getStopTotal_(st); } catch (e) { total = null; }
+  return {
+    action: "submit_stop",
+    date: manifest.dispatch_date,
+    truck: st.truck,
+    stop_id: st.stop_id,
+    customer_name: st.customer_name,
+    customer_code: st.customer_code || "",
+    cart_number: st.cart_number || "",
+    address: st.address || "",
+    delivery_time: st.delivery_time || "",
+    payment_terms: st.payment_terms || "",
+    order_note: st.order_note || "",
+    order_numbers: (st.orders || []).map((o) => o.order_number),
+    racks_expected: st.racks_expected,
+    racks_unloaded: st._racksUnloadedEntered,
+    line_items: lines,
+    total: total,
+    exceptions: [],
+    added_items: [],
+    signature_captured: false,
+    signature_image: null,
+    signature_skipped_reason: skipReason || "app error - details not captured",
+    rack_photo_image: null,
+    contact_emails: st.contact_emails || [],
+    extra_invoice_email: "",
+    test_mode: isTestMode_(st.truck),
+    paper_invoice: false,
+    payment_method: "none",
+    check_number: "",
+    submitted_at_iso: new Date().toISOString(),
+  };
+}
+
+async function submitStopInner_(wantsSignature) {
   if (!currentStop || isSubmitting) return;
 
   const hasSignature = wantsSignature && sigPad.hasStroke;
@@ -2974,7 +3061,22 @@ async function submitStop_(wantsSignature) {
   // apart. hasSignature here preserves submitStop_'s own "Submit Without
   // Signature" semantics (deliberately discards a drawn signature even if
   // one exists when that button was tapped instead of "Submit Delivery").
-  const payload = buildStopPdfPayload_("submit_stop", hasSignature);
+  let payload;
+  try {
+    payload = buildStopPdfPayload_("submit_stop", hasSignature);
+  } catch (buildErr1) {
+    console.error("payload build failed, retrying without images", buildErr1);
+    const keepPhoto = rackPhotoDataUrl;
+    try {
+      rackPhotoDataUrl = null;
+      payload = buildStopPdfPayload_("submit_stop", false);
+      payload.signature_skipped_reason = payload.signature_skipped_reason || skipReason || "app error - signature not captured";
+    } catch (buildErr2) {
+      console.error("payload build failed again, using the minimal payload", buildErr2);
+      payload = buildMinimalSubmitPayload_(skipReason);
+    }
+    rackPhotoDataUrl = keepPhoto;
+  }
   const racksUnloaded = payload.racks_unloaded;
   const exceptions = payload.exceptions;
   const addedItemsPayload = payload.added_items;
@@ -2987,6 +3089,9 @@ async function submitStop_(wantsSignature) {
   // changes the route list's pill COLOR (done_clean/done_exceptions both
   // render green now — see PROJECT-NOTES.md), only the underlying record.
   const newStatus = (exceptions.length > 0 || hasAddedItems) ? "done_exceptions" : "done_clean";
+  // Queue the delivery FIRST: a stop is only ever marked Delivered after its
+  // delivery is safely in the send queue.
+  queueOffline_(payload);
   saveDriverStateLocal_(stateKey_(currentStop), {
     racks_unloaded: racksUnloaded,
     exceptions: exceptions,
@@ -3017,7 +3122,6 @@ async function submitStop_(wantsSignature) {
   // and shows its own "synced" toast once the backend actually confirms —
   // so there's nothing left to branch on here.
   const customerName = currentStop.customer_name;
-  queueOffline_(payload);
   flushOfflineQueue_();
   if (driverStateSaveFailed_) {
     driverStateSaveFailed_ = false;
@@ -3564,7 +3668,22 @@ function queueOffline_(payload) {
   if (flushInProgress_) queuedDuringFlush_ = true;
 }
 
+// In-memory copy of the queue. Once set it is the source of truth for this
+// page session, so a delivery is still sent even if the iPad's browser
+// storage is full and the write to localStorage fails (it would otherwise be
+// lost: flushOfflineQueue_ reads the queue back from here).
+let queueMemory_ = null;
+let queueStorageWarned_ = false;
+
+// Files that can be downloaded again are dropped first when storage is full,
+// so a delivery never loses out to a cache.
+function evictReloadableCaches_() {
+  try { localStorage.removeItem(STORAGE_KEY_ITEMS_CATALOG_CACHE); } catch (e) { /* ignore */ }
+  try { localStorage.removeItem(STORAGE_KEY_ROUTE_PLAN_CACHE); } catch (e) { /* ignore */ }
+}
+
 function readQueue_() {
+  if (queueMemory_) return queueMemory_.slice();
   try {
     return JSON.parse(localStorage.getItem(STORAGE_KEY_QUEUE) || "[]");
   } catch (err) {
@@ -3572,11 +3691,25 @@ function readQueue_() {
   }
 }
 function writeQueue_(queue) {
+  queueMemory_ = queue.slice();
+  let saved = false;
   try {
     localStorage.setItem(STORAGE_KEY_QUEUE, JSON.stringify(queue));
+    saved = true;
   } catch (err) {
-    console.warn("could not persist offline queue", err);
+    evictReloadableCaches_();
+    try {
+      localStorage.setItem(STORAGE_KEY_QUEUE, JSON.stringify(queue));
+      saved = true;
+    } catch (err2) {
+      console.warn("could not persist offline queue", err2);
+    }
   }
+  if (!saved && queue.length > 0 && !queueStorageWarned_) {
+    queueStorageWarned_ = true;
+    showToast("This iPad is out of storage. Keep the app open until the delivery is sent.");
+  }
+  if (saved) queueStorageWarned_ = false;
   mirrorQueueToNative_(queue);
 }
 
@@ -3599,6 +3732,7 @@ async function flushOfflineQueue_() {
       // goes over the wire so the backend only ever sees the fields it
       // already expects.
       const { _queue_id, ...toSend } = payload;
+      toSend.submission_id = _queue_id; // lets the backend recognise a repeat of the same delivery (slow connection retry)
       const result = await sendToBackend_(toSend);
       if (!result) continue;
       sentIds.add(_queue_id);
@@ -3844,6 +3978,8 @@ function persistDriverStateStore_(all) {
   const today = (manifest ? manifest.dispatch_date : "") + "|";
   Object.keys(all).forEach((k) => { if (k.indexOf(today) !== 0) delete all[k]; });
   try { localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all)); return true; } catch (e2) { /* fall through */ }
+  evictReloadableCaches_();
+  try { localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(all)); return true; } catch (e2b) { /* fall through */ }
   Object.keys(all).forEach((k) => {
     const v = Object.assign({}, all[k]);
     delete v.signature_image; delete v.rack_photo_image;
