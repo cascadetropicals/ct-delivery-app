@@ -684,3 +684,21 @@ canvas#sig-pad { width: 100%; height: 220px; background: #fff; border: 2px dashe
 .paid-badge.partly { background: #e0a100; color: #fff; }
 .paid-note { background: #dcf3e3; color: #1f6b39; font-weight: 700; font-size: 18px; padding: 12px; border-radius: 8px; margin-bottom: 10px; }
 .paid-note.partly { background: #fdf0cc; color: #7a5200; }
+
+/* Monthly 3-question feedback popup (reuses the .feedback-* look) */
+.monthly-feedback-box { position: relative; text-align: left; }
+.monthly-feedback-box h3 { margin: 6px 0 14px; font-size: 20px; line-height: 1.3; }
+.mfb-head { font-size: 14px; color: #555; margin-right: 36px; }
+.mfb-step { font-size: 13px; color: #777; margin-top: 2px; }
+.mfb-close { position: absolute; top: 8px; right: 8px; width: 44px; height: 44px; border: none; background: transparent; font-size: 28px; line-height: 1; color: #555; }
+.mfb-scale { display: flex; gap: 8px; margin-top: 4px; }
+.mfb-score { flex: 1; min-height: 56px; font-size: 22px; font-weight: 600; border-radius: 12px; border: 3px solid #ccc; background: #fff; color: #222; }
+.mfb-score.selected { border-color: #2f5233; background: #e6f2e7; }
+.mfb-ends { display: flex; justify-content: space-between; font-size: 12px; color: #777; margin-top: 6px; }
+.mfb-scale-label { min-height: 24px; margin-top: 8px; text-align: center; font-weight: 600; color: #2f5233; }
+.mfb-notewrap { margin-top: 6px; }
+.mfb-notetoggle { background: none; border: none; color: #2f5233; font-size: 15px; text-decoration: underline; padding: 8px 0; }
+.mfb-counter { text-align: right; font-size: 12px; color: #777; margin-top: 4px; }
+.monthly-feedback-box .feedback-actions button.primary:disabled { opacity: 0.45; }
+.monthly-feedback-overlay { align-items: flex-end; }
+@media (min-width: 700px) { .monthly-feedback-overlay { align-items: center; } }

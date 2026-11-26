@@ -3214,7 +3214,8 @@ async function submitStopInner_(wantsSignature) {
   clearPaymentFields_();
   renderRouteList_();
   showScreen_("screen-route");
-  maybeShowFeedbackPopup_(payload);
+  // On a day the monthly 3-question popup is due, the daily thumbs popup is skipped.
+  if (!scheduleMonthlyFeedback_(payload)) maybeShowFeedbackPopup_(payload);
 }
 
 // ==================================================================
@@ -3352,6 +3353,7 @@ async function flushFeedbackQueue_() {
       const result = await sendToBackend_(item);
       if (!result) break; // offline or backend not ready — try again on the next flush
       sentIds.push(item._fid);
+      if (item.action === "submit_monthly_feedback") monthlyFbMarkAnswered_();
     }
     if (sentIds.length > 0) {
       writeFeedbackQueue_(readFeedbackQueue_().filter((it) => sentIds.indexOf(it._fid) === -1));
@@ -3359,6 +3361,317 @@ async function flushFeedbackQueue_() {
   } finally {
     feedbackFlushing_ = false;
   }
+}
+
+// ==================================================================
+// MONTHLY FEEDBACK POPUP — 3 short questions, shown rarely (about once a
+// month per iPad). Q1/Q2 are a 1-5 scale, Q3 is an optional free text.
+// Sent to the backend's submit_monthly_feedback action (FEEDBACK tab).
+// Nothing identifying is sent: no name, truck, stop, customer or time.
+// The existing daily thumbs popup stays; on a day when this popup is due
+// the thumbs popup is skipped, so a driver never sees two surveys at once.
+// ==================================================================
+const FB_MIN_DAYS_USED = 3;      // the app must have been used on at least this many days before the first popup
+const FB_COOLDOWN_DAYS = 30;     // after an answer, no popup for this many days
+const FB_SNOOZE_DAYS = 7;        // after "Not now", ask again no sooner than this many days
+const FB_MAX_DISMISSALS = 2;     // after this many "Not now" taps, stay quiet until the next calendar month
+const FB_DELAY_MS = 7000;        // wait this long after a submit before showing (route list must be calm)
+const FB_TEXT_MAX = 500;         // max characters for notes
+const FB_APP_VERSION = "2026-11-26a"; // sent along so answers can be matched to an app version
+const STORAGE_KEY_MONTHLY_FB = "ct_monthly_feedback_v1"; // {lastAnswered, snoozeUntil, dismissCount, dismissMonth, daysUsed:[]}
+
+const FB_SCALE_LABELS = ["Strongly disagree", "Disagree", "Neutral", "Agree", "Strongly agree"];
+const FB_QUESTIONS = [
+  { id: "easy_to_use", text: "The app is easy to use." },
+  { id: "helps_work", text: "The app helps me do my work." },
+];
+const FB_Q3_TEXT = "Is there anything that annoys you, or any suggestion to improve the app? (optional)";
+
+let monthlyFbShownThisSession_ = false;
+let monthlyFbTimer_ = null;
+
+function fbMonthKey_(d) {
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+}
+
+function readMonthlyFbState_() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORAGE_KEY_MONTHLY_FB) || "{}");
+    return s && typeof s === "object" ? s : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function writeMonthlyFbState_(s) {
+  try {
+    localStorage.setItem(STORAGE_KEY_MONTHLY_FB, JSON.stringify(s));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function monthlyFbStorageOk_() {
+  try {
+    localStorage.setItem("ct_fb_probe", "1");
+    localStorage.removeItem("ct_fb_probe");
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Counts the days the app was used (a stop was submitted); keeps the last 10.
+function noteMonthlyFbUse_(dateStr) {
+  if (!dateStr) return;
+  const s = readMonthlyFbState_();
+  const days = Array.isArray(s.daysUsed) ? s.daysUsed : [];
+  if (days.indexOf(dateStr) === -1) days.push(dateStr);
+  s.daysUsed = days.slice(-10);
+  writeMonthlyFbState_(s);
+}
+
+function monthlyFbPendingInQueue_() {
+  return readFeedbackQueue_().some((it) => it && it.action === "submit_monthly_feedback");
+}
+
+function monthlyFbDue_() {
+  if (monthlyFbShownThisSession_) return false; // never two surveys in one session
+  if (monthlyFbPendingInQueue_()) return false; // an answer is still waiting to be sent
+  if (!monthlyFbStorageOk_()) return true;      // can't remember anything: at most once per session (flag above)
+  const s = readMonthlyFbState_();
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  if ((Array.isArray(s.daysUsed) ? s.daysUsed.length : 0) < FB_MIN_DAYS_USED) return false;
+  if (s.lastAnswered && now < s.lastAnswered + FB_COOLDOWN_DAYS * day) return false;
+  if (s.snoozeUntil && now < s.snoozeUntil) return false;
+  if ((s.dismissCount || 0) >= FB_MAX_DISMISSALS && s.dismissMonth === fbMonthKey_(new Date())) return false;
+  return true;
+}
+
+// Called after a submit. Returns true when the monthly popup is due (so the
+// caller skips the daily thumbs popup), and schedules it to appear shortly.
+function scheduleMonthlyFeedback_(payload) {
+  noteMonthlyFbUse_(payload && payload.date);
+  if (!monthlyFbDue_()) return false;
+  clearTimeout(monthlyFbTimer_);
+  monthlyFbTimer_ = setTimeout(() => {
+    // Only when the route list is calm: no saving in progress, no other popup open.
+    const routeScreen = document.getElementById("screen-route");
+    const calm = routeScreen && routeScreen.classList.contains("active") && !isSubmitting && !document.querySelector(".feedback-overlay");
+    if (calm && monthlyFbDue_()) showMonthlyFeedbackPopup_();
+  }, FB_DELAY_MS);
+  return true;
+}
+
+function monthlyFbMarkDismissed_() {
+  const s = readMonthlyFbState_();
+  const nowMonth = fbMonthKey_(new Date());
+  if (s.dismissMonth !== nowMonth && (s.dismissCount || 0) >= FB_MAX_DISMISSALS) s.dismissCount = 0; // new month: fresh start
+  s.dismissCount = (s.dismissCount || 0) + 1;
+  s.dismissMonth = nowMonth;
+  s.snoozeUntil = Date.now() + FB_SNOOZE_DAYS * 24 * 60 * 60 * 1000;
+  writeMonthlyFbState_(s);
+}
+
+// Called by flushFeedbackQueue_ once the backend confirmed an answer.
+function monthlyFbMarkAnswered_() {
+  const s = readMonthlyFbState_();
+  s.lastAnswered = Date.now();
+  s.dismissCount = 0;
+  s.snoozeUntil = 0;
+  writeMonthlyFbState_(s);
+}
+
+function showMonthlyFeedbackPopup_() {
+  monthlyFbShownThisSession_ = true;
+  const previousFocus = document.activeElement;
+  const answers = { q1: null, q2: null, q1note: "", q2note: "", q3: "" };
+  let step = 0; // 0 = Q1, 1 = Q2, 2 = Q3
+
+  const overlay = document.createElement("div");
+  overlay.className = "feedback-overlay monthly-feedback-overlay";
+  const box = document.createElement("div");
+  box.className = "feedback-box monthly-feedback-box";
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-modal", "true");
+  box.setAttribute("aria-labelledby", "mfb-title");
+  overlay.appendChild(box);
+
+  function el_(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function close_() {
+    document.removeEventListener("keydown", onKey_, true);
+    overlay.remove();
+    try { if (previousFocus && previousFocus.focus) previousFocus.focus(); } catch (e) {}
+  }
+
+  function dismiss_() {
+    if (step === 2) { send_(); return; } // already answered Q1/Q2: closing just skips the text
+    monthlyFbMarkDismissed_();
+    close_();
+  }
+
+  function send_() {
+    // Saved on the device first so it is never lost; sent quietly in the background.
+    // No timestamp, no truck/stop/customer. _fid is only a random id so the backend can ignore a double send.
+    queueFeedback_({
+      action: "submit_monthly_feedback",
+      app: "CT Delivery App",
+      version: FB_APP_VERSION,
+      language: "en",
+      round: fbMonthKey_(new Date()),
+      q1_id: FB_QUESTIONS[0].id, q1_score: answers.q1, q1_note: answers.q1note.trim(),
+      q2_id: FB_QUESTIONS[1].id, q2_score: answers.q2, q2_note: answers.q2note.trim(),
+      q3_text: answers.q3.trim(),
+    });
+    flushFeedbackQueue_();
+    box.textContent = "";
+    const thanks = el_("h3", "", "Thank you. This helps us improve the app.");
+    thanks.id = "mfb-title";
+    box.appendChild(thanks);
+    setTimeout(close_, 3000);
+  }
+
+  function render_() {
+    box.textContent = "";
+    const closeBtn = el_("button", "mfb-close", "×");
+    closeBtn.type = "button";
+    closeBtn.setAttribute("aria-label", "Close");
+    closeBtn.addEventListener("click", dismiss_);
+    box.appendChild(closeBtn);
+
+    const head = el_("div", "mfb-head", "Quick question. About 15 seconds.");
+    box.appendChild(head);
+    box.appendChild(el_("div", "mfb-step", "Question " + (step + 1) + " of 3"));
+
+    const actions = el_("div", "feedback-actions");
+    let primary;
+
+    if (step < 2) {
+      const q = FB_QUESTIONS[step];
+      const key = step === 0 ? "q1" : "q2";
+      const noteKey = key + "note";
+      const title = el_("h3", "", q.text);
+      title.id = "mfb-title";
+      box.appendChild(title);
+
+      const scale = el_("div", "mfb-scale");
+      scale.setAttribute("role", "radiogroup");
+      scale.setAttribute("aria-labelledby", "mfb-title");
+      const label = el_("div", "mfb-scale-label", "");
+      label.setAttribute("aria-live", "polite");
+      const btns = [];
+      for (let i = 1; i <= 5; i++) {
+        const b = el_("button", "mfb-score", String(i));
+        b.type = "button";
+        b.setAttribute("role", "radio");
+        b.setAttribute("aria-label", i + " - " + FB_SCALE_LABELS[i - 1]);
+        b.setAttribute("aria-checked", "false");
+        b.addEventListener("click", () => {
+          answers[key] = i;
+          btns.forEach((x, idx) => {
+            x.classList.toggle("selected", idx + 1 === i);
+            x.setAttribute("aria-checked", idx + 1 === i ? "true" : "false");
+          });
+          label.textContent = FB_SCALE_LABELS[i - 1];
+          primary.disabled = false;
+        });
+        btns.push(b);
+        scale.appendChild(b);
+      }
+      box.appendChild(scale);
+      const ends = el_("div", "mfb-ends");
+      ends.appendChild(el_("span", "", FB_SCALE_LABELS[0]));
+      ends.appendChild(el_("span", "", FB_SCALE_LABELS[4]));
+      box.appendChild(ends);
+      box.appendChild(label);
+
+      // optional short note, collapsed until asked for
+      const noteWrap = el_("div", "mfb-notewrap");
+      const noteToggle = el_("button", "mfb-notetoggle", "Add a note");
+      noteToggle.type = "button";
+      const note = el_("textarea", "feedback-note");
+      note.rows = 2;
+      note.maxLength = FB_TEXT_MAX;
+      note.style.display = "none";
+      note.value = answers[noteKey];
+      note.addEventListener("input", () => { answers[noteKey] = note.value; });
+      noteToggle.addEventListener("click", () => {
+        noteToggle.style.display = "none";
+        note.style.display = "block";
+        note.focus();
+      });
+      if (answers[noteKey]) { noteToggle.style.display = "none"; note.style.display = "block"; }
+      noteWrap.appendChild(noteToggle);
+      noteWrap.appendChild(note);
+      box.appendChild(noteWrap);
+
+      if (answers[key]) {
+        btns[answers[key] - 1].classList.add("selected");
+        btns[answers[key] - 1].setAttribute("aria-checked", "true");
+        label.textContent = FB_SCALE_LABELS[answers[key] - 1];
+      }
+
+      const notNow = el_("button", "feedback-skip", "Not now");
+      notNow.type = "button";
+      notNow.addEventListener("click", dismiss_);
+      primary = el_("button", "primary", "Next");
+      primary.type = "button";
+      primary.disabled = !answers[key];
+      primary.addEventListener("click", () => { if (answers[key]) { step++; render_(); } });
+      actions.appendChild(notNow);
+      actions.appendChild(primary);
+    } else {
+      const title = el_("h3", "", FB_Q3_TEXT);
+      title.id = "mfb-title";
+      box.appendChild(title);
+      const ta = el_("textarea", "feedback-note");
+      ta.rows = 4;
+      ta.maxLength = FB_TEXT_MAX;
+      ta.value = answers.q3;
+      ta.setAttribute("aria-labelledby", "mfb-title");
+      const counter = el_("div", "mfb-counter", ta.value.length + " / " + FB_TEXT_MAX);
+      ta.addEventListener("input", () => {
+        answers.q3 = ta.value;
+        counter.textContent = ta.value.length + " / " + FB_TEXT_MAX;
+      });
+      box.appendChild(ta);
+      box.appendChild(counter);
+      const skip = el_("button", "feedback-skip", "Skip");
+      skip.type = "button";
+      skip.addEventListener("click", () => { answers.q3 = ""; send_(); });
+      primary = el_("button", "primary", "Send");
+      primary.type = "button";
+      primary.addEventListener("click", send_);
+      actions.appendChild(skip);
+      actions.appendChild(primary);
+    }
+    box.appendChild(actions);
+    const first = box.querySelector(".mfb-score.selected") || box.querySelector(".mfb-score") || box.querySelector("textarea");
+    if (first) first.focus();
+  }
+
+  // Escape closes; Tab stays inside the popup.
+  function onKey_(ev) {
+    if (ev.key === "Escape") { ev.preventDefault(); dismiss_(); return; }
+    if (ev.key !== "Tab") return;
+    const f = Array.from(box.querySelectorAll("button, textarea")).filter((x) => !x.disabled && x.offsetParent !== null);
+    if (f.length === 0) return;
+    const first = f[0], last = f[f.length - 1];
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+  }
+  document.addEventListener("keydown", onKey_, true);
+
+  document.body.appendChild(overlay);
+  render_();
 }
 
 // ==================================================================
